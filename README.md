@@ -33,9 +33,14 @@ If we assume the entropy pool is always full enough, then we no longer need to k
 
 ## The Period
 
+The implamanetation of /dev/random is AES-OFB, so the period for one invokation is the block size of the underlying blockcipher, after this size is exuasted the IV+key will repeat leading to a repeat of the PRNG stream. If you need more than 2^256 blocks of entropy in a single buffer then you might not be the kind of user that this driver wants to serve.  Future invocations of /dev/random are indipendent of previous invocations, old key material is destoryed and there no cycle here.
+
+One place you can take a request for entropy larger than 2^256 is /dev/urandom - this interface spends extra effort so that a given session doesn't have a period.  The 'u' in urandom means Random Read Unlimited - and this urandom implamenation takes that quite litterally.
+
 Lets assume a pool size of 1k, or 1024 bytes, and AES-256-OFB is chosen as the means of generation.  Each bit within the entropy pool represents one pathway down a twist-table that will yield different key material.  1024 bytes, is 8192 bits, which represents 8192 unique entry points that can generate a total of 2,097,152 unique AES-256 without needing to reschedule the state of the entropy pool. A key pool is a type of entropy pool that is a dense block multi-dimensional block of keys, 
 
-For the period of the random number generator to ever repeat; the key, iv and image need to repeat.  Even if AES-128 is chosen, these values will never repeat in the time frames that we are concerned with.
+The keypool still needs to be rescheduled, and upon doing so - the state that produced the previous PRNG stream will have been overwritten with new entropy.  As a result, the key material in the keypool tumbles and is transformed by use, if AES-256 was used - then the PRNG would not repeat until the exact same IV, Key, and Image are reused, which are three distcit 256bit values. Reusing all three would cause a repeat of a single 256bit block within a single session of /dev/urandom - the rest of the stream will continue to be random because a new key is chosen is round - which is a new indipdedent event and not cylicacal.  I think we can all agree that repeating even one block every 2^768 blocks is completely and totally unacceptable - we want a perfect device driver.  So fine, we will reschedule the keypool on a regular interval - adding new indidpdent events.  As long as each augmentation of the keypool introduces new indidpdent events, these values are additive and the key material produced will not cycle - /dev/urandom should be an infinate source of randomness that never repeats or has a Period of any kind (period).
+
 
 ## Keypool Creation
 
