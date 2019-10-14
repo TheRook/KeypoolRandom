@@ -11,6 +11,8 @@
 // to run:
 // ./poolrand
 // 
+
+// remove _crng_backtrack_protect - it is all protected from backtracks.
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  IMPORTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -221,11 +223,13 @@ u64 get_random_u64(void)
 {
   long seed;
   u64 anvil;
+  int mop_entry_point;
   uint64_t session = get_session(&anvil);
   int entry_point = session % POOL_SIZE_BITS;
   bitcpy( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
   // XOR over something globally unique.
   // The session isn't known to the caller.
+  // This jumptable pattern follows a similar pattern to the AES counterpart.
   xor_bits( anvil, runtime_entropy, entry_point, session, sizeof(anvil));
 
   if (arch_get_random_seed_long(&seed)) {
@@ -234,22 +238,26 @@ u64 get_random_u64(void)
      xor_bits(anvil, seed, 2, sizeof(anvil));
      arch_get_random_seed_long(&seed);
      //cleanup - remove entry point:
-     xor_bits( runtime_entropy + entry_point, seed, sizeof(anvil));
+     xor_bits( runtime_entropy + entry_point, seed, sizeof(seed));
+     //double-tap to get rid of the lower bits:
+     arch_get_random_seed_long(&seed);
+     //cleanup - remove entry point:
+     xor_bits( runtime_entropy + entry_point + sizeof(seed), seed, sizeof(seed));
   } else {
     // add the next chunk:
     xor_bits( anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
     //Get another point of PRNG to scrub this value.
-    int mop_entry_point =  anvil % POOL_SIZE_BITS;
+    mop_entry_point =  anvil % POOL_SIZE_BITS;
     xor_bits( anvil, runtime_entropy + mop_entry_point, sizeof(anvil));
     //cleanup - remove entry point
     xor_bits( runtime_entropy + entry_point, anvil, sizeof(anvil));
+    mop_entry_point = 0;
   }
 
   //No one will know what this entry point was, 
   //or what it's value was before or after invocation.
   entry_point = 0;
   key_entry_point = 0;
-  mop = 0;
   return anvil;
 }
 
@@ -260,6 +268,8 @@ u32 get_random_u32(void)
 {
   u32 anvil;
   u32 mop;
+  long seed;
+  int mop_entry_point;
   //The caller doesn't know the value of session
   uint64_t session = get_session(&anvil);
   int entry_point = session % POOL_SIZE_BITS;
@@ -270,6 +280,7 @@ u32 get_random_u32(void)
   xor_bits( &anvil, runtime_entropy, entry_point, session, sizeof(anvil));
 
   if (arch_get_random_seed_long(&seed)) {
+     //Only 32 bits needed.
      xor_bits(&anvil, seed, 0, sizeof(anvil));
      //Get another chunk to fix the keypool:
      arch_get_random_seed_long(&seed);
@@ -279,15 +290,15 @@ u32 get_random_u32(void)
     // add the next chunk:
     xor_bits( &anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
     //Get another point of PRNG to scrub this value.
-    int mop_entry_point =  anvil % POOL_SIZE_BITS;
+    mop_entry_point =  anvil % POOL_SIZE_BITS;
     xor_bits( &anvil, runtime_entropy + mop_entry_point, sizeof(anvil));
     //cleanup - remove entry point
     xor_bits( runtime_entropy + entry_point,anvil , sizeof(anvil));
+    mop_entry_point = 0;
   }
   //clear your tracks:
   entry_point = 0;
   key_entry_point = 0;
-  mop = 0;
   return anvil;
 }
 
@@ -303,7 +314,10 @@ u32 get_random_u32(void)
 //If there is one function to make lockless, this is the one
 void add_interrupt_randomness(int irq, int irq_flags)
 {
-  struct entropy_store  *r;
+  //Globally unique session
+  uint64_t session = get_session(&irq);
+  //Other itterupts are unlikely to choose our same entry_point
+  int entry_point = session % POOL_SIZE_BITS;
   uint8_t  *fast_pool = this_cpu_ptr(&irq_randomness);
   struct pt_regs    *regs = get_irq_regs();
   unsigned long   now = jiffies;
@@ -332,10 +346,6 @@ void add_interrupt_randomness(int irq, int irq_flags)
      xor_bits(fast_pool, seed, 2, 4);
   }
 
-  uint64_t session = get_session(&irq);
-  //Other itterupts are unlikely to choose our same entry_point
-  int entry_point = session % POOL_SIZE_BITS;
-
   //Now add a drop of entropy to the pool - it is 1/POOL_SIZE_BITS chance of an overwrite
   xor_bits(runtime_entropy, fast_pool, entry_point, fast_pool, 4)
 }
@@ -350,9 +360,63 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
   _mix_pool_bytes(r, in, bytes);
 }
 
+
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 {
+  unsigned long flags;
+  int   i, num;
+  uint8_t local_iv[BLOCK_SIZE]
+  union {
+    __u8  block[BLOCK_SIZE];
+    __u32 key[8];
+  } buf;
 
+  //Generate a secure key:
+  if (r) {
+    num = extract_crng_user(&buf, BLOCK_SIZE);
+    if (num == 0)
+      return;
+  } else {
+    _extract_crng(&primary_crng, buf.block);
+  }
+  for (i = 0; i < 8; i++) {
+    unsigned long rv;
+    if (!arch_get_random_seed_long(&rv) &&
+        !arch_get_random_long(&rv))
+      rv = random_get_entropy();
+    crng->state[i+4] ^= buf.key[i] ^ rv;
+  }
+  
+  //Lets mix this pool:
+  mix_pool_bytes(crng, r, POOL_SIZE);
+  extract_crng_user(&local_iv, BLOCK_SIZE);
+  //encrypt the entire entropy pool with the new key:
+  AesOfbInitialiseWithKey( &aesOfb, crng->state, (BLOCK_SIZE/8), local_iv );
+  //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
+  AesOfbOutput( &aesOfb, runtime_entropy, POOL_SIZE); 
+
+  memzero_explicit(&buf, sizeof(buf));
+  crng->init_time = jiffies;
+  if (crng == &primary_crng && crng_init < 2) {
+    invalidate_batched_entropy();
+    numa_crng_init();
+    crng_init = 2;
+    process_random_ready_list();
+    wake_up_interruptible(&crng_init_wait);
+    pr_notice("random: crng init done\n");
+    if (unseeded_warning.missed) {
+      pr_notice("random: %d get_random_xx warning(s) missed "
+          "due to ratelimiting\n",
+          unseeded_warning.missed);
+      unseeded_warning.missed = 0;
+    }
+    if (urandom_warning.missed) {
+      pr_notice("random: %d urandom warning(s) missed "
+          "due to ratelimiting\n",
+          urandom_warning.missed);
+      urandom_warning.missed = 0;
+    }
+  }
 }
 
 static ssize_t
