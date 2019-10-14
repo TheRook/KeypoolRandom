@@ -227,10 +227,6 @@ u64 get_random_u64(void)
   uint64_t session = get_session(&anvil);
   int entry_point = session % POOL_SIZE_BITS;
   bitcpy( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
-  // XOR over something globally unique.
-  // The session isn't known to the caller.
-  // This jumptable pattern follows a similar pattern to the AES counterpart.
-  xor_bits( anvil, runtime_entropy, entry_point, session, sizeof(anvil));
 
   if (arch_get_random_seed_long(&seed)) {
      xor_bits(anvil, seed, 0, sizeof(anvil));
@@ -244,6 +240,10 @@ u64 get_random_u64(void)
      //cleanup - remove entry point:
      xor_bits( runtime_entropy + entry_point + sizeof(seed), seed, sizeof(seed));
   } else {
+    // XOR over something globally unique.
+    // The session isn't known to the caller.
+    // This jumptable pattern follows a similar pattern to the AES counterpart.
+    xor_bits( anvil, runtime_entropy, entry_point, session, sizeof(anvil));
     // add the next chunk:
     xor_bits( anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
     //Get another point of PRNG to scrub this value.
@@ -275,18 +275,19 @@ u32 get_random_u32(void)
   int entry_point = session % POOL_SIZE_BITS;
   int key_entry_point = (int)*runtime_entropy + entry_point
   bitcpy( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
-  // XOR over something globally unique.
-  // The session isn't known to the caller.
-  xor_bits( &anvil, runtime_entropy, entry_point, session, sizeof(anvil));
 
+  //Do we have a good source of hardware random values?
   if (arch_get_random_seed_long(&seed)) {
-     //Only 32 bits needed.
+     //Only 32 bits needed
      xor_bits(&anvil, seed, 0, sizeof(anvil));
      //Get another chunk to fix the keypool:
      arch_get_random_seed_long(&seed);
      //cleanup - remove entry point
      xor_bits( runtime_entropy + entry_point, seed, sizeof(anvil));
   } else {
+    // XOR over something globally unique.
+    // The session isn't known to the caller.
+    xor_bits( &anvil, runtime_entropy, entry_point, session, sizeof(anvil));
     // add the next chunk:
     xor_bits( &anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
     //Get another point of PRNG to scrub this value.
@@ -350,17 +351,6 @@ void add_interrupt_randomness(int irq, int irq_flags)
   xor_bits(runtime_entropy, fast_pool, entry_point, fast_pool, 4)
 }
 
-// This only removes locking from the existing mix_pool_bytes() - we want a race conditions
-// The underlying mix_pool_bytes is awesome, but the locks around it are not needed with a keypool.
-// This one change removes locks from add_timer_randomness, add_input_randomness, add_disk_randomness, and add_interrupt_randomness
-// add_timer_randomness add_input_randomness add_disk_randomness are fine becuase they do not contain locks.
-static void mix_pool_bytes(struct entropy_store *r, const void *in,
-         int nbytes)
-{
-  _mix_pool_bytes(r, in, bytes);
-}
-
-
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 {
   unsigned long flags;
@@ -370,6 +360,9 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
     __u8  block[BLOCK_SIZE];
     __u32 key[8];
   } buf;
+
+  // fetch an IV in the current state.
+  extract_crng_user(&local_iv, BLOCK_SIZE);
 
   //Generate a secure key:
   if (r) {
@@ -387,9 +380,9 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
     crng->state[i+4] ^= buf.key[i] ^ rv;
   }
   
-  //Lets mix this pool:
-  mix_pool_bytes(crng, r, POOL_SIZE);
-  extract_crng_user(&local_iv, BLOCK_SIZE);
+  //We used some unclean hardware input, lets mix the pool
+  mix_pool_bytes(crng, runtime_entropy, POOL_SIZE);
+
   //encrypt the entire entropy pool with the new key:
   AesOfbInitialiseWithKey( &aesOfb, crng->state, (BLOCK_SIZE/8), local_iv );
   //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
@@ -419,6 +412,17 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   }
 }
 
+// This only removes locking from the existing mix_pool_bytes() - we want a race conditions
+// The underlying mix_pool_bytes is awesome, but the locks around it are not needed with a keypool.
+// This one change removes locks from add_timer_randomness, add_input_randomness, add_disk_randomness, and add_interrupt_randomness
+// add_timer_randomness add_input_randomness add_disk_randomness are fine becuase they do not contain locks.
+static void mix_pool_bytes(struct entropy_store *r, const void *in,
+         int nbytes)
+{
+  _mix_pool_bytes(r, in, bytes);
+}
+
+// no blocking
 static ssize_t
 random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
@@ -428,6 +432,9 @@ random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 static ssize_t
 urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
+  //The user is expecting to get the best restuls.
+  //Lets start off with a fresh entropy pool for everyone.
+  crng_reseed(file, runtime_etropy);
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
   return extract_crng_user_unlimited(buf, nbytes);
