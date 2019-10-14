@@ -24,7 +24,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define BUFFER_SIZE             1024
-#define BLOCK_SIZE		256
+#define BLOCK_SIZE                256
 #define BLOCK_SIZE_BITS         BLOCK_SIZE * 8
 #define POOL_SIZE               BLOCK_SIZE * 4
 #define POOL_SIZE_BITS          BLOCK_SIZE * 8
@@ -52,20 +52,20 @@ void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, 
   int start_byte = bit_offset/32;        //The start byte to start the copy
   int pos = bit_offset%32;      //The start bit within the first byte
   for(int k = 0; k < byte_length; k++){
-      //Treat the source as a circular buffer.	  
+      //Treat the source as a circular buffer.          
       if(start_byte + k > source_len){
- 	start_byte = 0;
-	if(k > source_len){
-	    //Should not happen.
-	    break;
-	}
+         start_byte = 0;
+        if(k > source_len){
+            //Should not happen.
+            break;
+        }
       }
       dest[k] = (0xffffffff >> (32-(pos))) << source[start_byte+k];
       if(k == byte_length-1){
-	//end the array with the bit position compliment
-	pos = 32 - (bit_offset%32);
+        //end the array with the bit position compliment
+        pos = 32 - (bit_offset%32);
       }else{
-      	pos = 0;
+              pos = 0;
       }
   }
 }
@@ -100,25 +100,25 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //The key, IV and Image will tumble for as long as they need, and copy out PRNG to the user. 
     while( amountLeft > 0 )
     {
-	chunk = __min( amountLeft, BLOCK_SIZE );
+        chunk = __min( amountLeft, BLOCK_SIZE );
         //rescheudle they key each round
         //Follow the twist, the iv we chose tells us which key to use
         //This routine needs the hardest to guess key in constant time.
         //we add the image_entry_point to avoid using the same (iv, key) combination - which still shouldn't happen.
-	int key_entry_point = ((int)*local_iv + image_entry_point) % (POOL_SIZE - BLOCK_SIZE);
+        int key_entry_point = ((int)*local_iv + image_entry_point) % (POOL_SIZE - BLOCK_SIZE);
         //Generate one block of PRNG
         AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
         AesOfbOutput( &aesOfb, local_image, chunk);
         //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
-	memcpy( __user_buf + (nbytes - amountLeft), local_image, chunk);
+        memcpy( __user_buf + (nbytes - amountLeft), local_image, chunk);
         //This is the resulting IV unused from AES-OFB, intened to be used in the next round:
         memcpy( local_iv, aesOfb.CurrentCipherBlock, BLOCK_SIZE);
         amountLeft -= chunk;
-	//At the end of the loop we get:
-	//The cipher text from this round is in local_image, which in the input for the next round
-	//The IV is a PRNG feedback as per the OFB spec - this is consistant
-	//A new secret key is re-chosen each round, the new IV is used to choose the new key.
-	//Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
+        //At the end of the loop we get:
+        //The cipher text from this round is in local_image, which in the input for the next round
+        //The IV is a PRNG feedback as per the OFB spec - this is consistant
+        //A new secret key is re-chosen each round, the new IV is used to choose the new key.
+        //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
     }
     //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
     //Encrypt our entropy point with the key material derivied in this local session
@@ -151,7 +151,7 @@ int
     extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
-    	printf("%1x", local_block[i]);
+            printf("%1x", local_block[i]);
      }
     return 0;
 }
