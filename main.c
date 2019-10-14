@@ -1,5 +1,12 @@
-// rando
-// a lockless rand implamentation that conforms to NIST standards 
+// Keypool Random
+//
+// This main.c file builds a new extract_crng_user() method which is used by /dev/random.
+// We include other code to get extract_crng_user() up and running.
+//
+// to build:
+// ./build.sh
+// to run:
+// ./poolrand
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  IMPORTS
