@@ -1,13 +1,16 @@
 // Keypool Random
 //
 // This main.c file builds a new extract_crng_user() method which is used by /dev/random.
-// We include other code to get extract_crng_user() up and running.
+//  - https://github.com/torvalds/linux/blob/master/drivers/char/random.c#L1120
+//
+// This file includes other code to get extract_crng_user()
+// works on mac or linux using gcc
 //
 // to build:
 // ./build.sh
 // to run:
 // ./poolrand
-
+// 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  IMPORTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
