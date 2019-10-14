@@ -1,8 +1,18 @@
-# LocklessRand
+# Keypool Random - A cryptogrpahically secure lockless PRNG device driver
 
 ## Motivation:
 
-Any improvement in the linux kernel's performance has a dramatic effect on power usage worldwide.  If we can improve the efficiency of Linux’s random number generator by removing bottlenecks then our cell-phone battery will last longer, our data centers will draw less electricity, and we’ll produce less CO2.   None of this should be done at sacrificing basic security needs or violating any NIST requirement.  We might be able to get more out of the existing entropy pool in the Linux Kernel using AES-OFB, this project is exploring what that looks like.
+Any improvement in the linux kernel's performance has a dramatic effect on power usage worldwide.  If we can improve the efficiency of Linux’s random number generator by removing bottlenecks then our cell-phone battery will last longer, our data centers will draw less electricity, and the technology we love will produce less CO2.   None of this should be done at sacrificing basic security needs or violating any NIST requirement.  We might be able to get more out of the existing entropy pool in the Linux Kernel using AES-OFB, this project is exploring what that looks like.
+
+## Goals:
+ - Follow NIST security requirements.
+ - Provide a high bar of security while being a very efficient source of random values 
+ - Function-level security where all Inputs are untrusted
+ - All outputs are AES cipher-text 
+ - Don’t trust input from userspace or from hardware
+ - No worse than hardware rand, but better than the a backdoored hardware rand. 
+ - Hardware random is used instead of initializing to 0’s as the current implementation does.
+ - Race conditions help with the generation of random values and maintaining function-level security.
 
 ## Foreword:
 
@@ -40,16 +50,4 @@ The encryption key used is always one block of the global entropy pool - and thi
 In the diagram above, you can see that the the PRNG output becomes the IV input to the next round. After a user request for PRNG has been filled, the pool needs to be modified.   Specifically the key material used for this session needs to be destroyed, and we do this by mixing new entropy into the pool.  We take the additional block of IV, this would have been used to encrypt the next block of plaintext.  This IV is unique in a number of ways,  It’s seed comes from this session universally unique IV, and due to an intended race condition may or may not have been generated using multiple encryption keys.
 
 In the same way that the output PRNG becomes the next IV - the universally unique, and unused output PRNG from this session becomes input to the entropy pool.  The input from the last step, overwrites the entry point into the twist table, making sure no other user from the device driver will be able to drive even remotely similar key material.
-
-
-## Goals:
- - Follow NIST security requirements.
- - Provide a high bar of security while being a very efficient source of random values 
- - Function-level security where all Inputs are untrusted
- - All outputs are AES cipher-text 
- - Don’t trust input from userspace or from hardware
- - No worse than hardware rand, but better than the a backdoored hardware rand. 
- - Hardware random is used instead of initializing to 0’s as the current implementation does.
- - Race conditions help with the generation of random values and maintaining function-level security.
-
 
