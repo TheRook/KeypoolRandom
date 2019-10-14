@@ -31,7 +31,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 #define BUFFER_SIZE             1024
-#define BLOCK_SIZE                256
+#define BLOCK_SIZE              256
 #define BLOCK_SIZE_BITS         BLOCK_SIZE * 8
 #define POOL_SIZE               BLOCK_SIZE * 4
 #define POOL_SIZE_BITS          BLOCK_SIZE * 8
@@ -42,11 +42,13 @@
 //Global runtime entropy
 uint8_t runtime_entropy[POOL_SIZE];
 
-int load_file(uint8_t dest[], int len){
+int load_file(uint8_t dest[], int len)
+{
   int ret = 0;
   FILE *seed_file;
   seed_file = fopen("seed", "r");
-  if(seed_file != NULL){
+  if(seed_file != NULL)
+  {
      fread(dest, 1, len, seed_file);
      ret = 1;
   }
@@ -58,17 +60,21 @@ void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, 
 {
   int start_byte = bit_offset/32;        //The start byte to start the copy
   int pos = bit_offset%32;      //The start bit within the first byte
-  for(int k = 0; k < byte_length; k++){
+  for(int k = 0; k < byte_length; k++)
+  {
       //Treat the source as a circular buffer.          
-      if(start_byte + k > source_len){
+      if(start_byte + k > source_len)
+      {
          start_byte = 0;
-        if(k > source_len){
+        if(k > source_len)
+        {
             //Should not happen.
             break;
         }
       }
       dest[k] = (0xffffffff >> (32-(pos))) << source[start_byte+k];
-      if(k == byte_length-1){
+      if(k == byte_length-1)
+      {
         //end the array with the bit position compliment
         pos = 32 - (bit_offset%32);
       }else{
