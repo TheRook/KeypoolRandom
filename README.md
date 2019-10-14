@@ -1,4 +1,4 @@
-# Keypool Random - A cryptogrpahically secure lockless PRNG device driver
+# Keypool Random - A cryptographically secure lockless PRNG device driver
 
 ## Motivation:
 
