@@ -16,13 +16,59 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  IMPORTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+#include "types.h"
+#include <linux/utsname.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/major.h>
+#include <linux/string.h>
+#include <linux/fcntl.h>
+#include <linux/slab.h>
+#include <linux/random.h>
+#include <linux/poll.h>
+#include <linux/init.h>
+#include <linux/fs.h>
+#include <linux/genhd.h>
+#include <linux/interrupt.h>
+#include <linux/mm.h>
+#include <linux/nodemask.h>
+#include <linux/spinlock.h>
+#include <linux/kthread.h>
+#include <linux/percpu.h>
+#include <linux/cryptohash.h>
+#include <linux/fips.h>
+#include <linux/freezer.h>
+#include <linux/ptrace.h>
+#include <linux/workqueue.h>
+#include <linux/irq.h>
+#include <linux/ratelimit.h>
+#include <linux/syscalls.h>
+#include <linux/completion.h>
+#include <linux/uuid.h>
+#include <crypto/chacha.h>
+
+#include <asm/processor.h>
+#include <linux/uaccess.h>
+#include <asm/irq.h>
+#include <asm/irq_regs.h>
+#include <asm/io.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/random.h>
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <string.h>
+//#include <stdint.h>
+//#include <string.h>
 #include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
 #include <time.h>
+
+
+
+//#include "include/linux/types.h"
+
+//#include "include/linux/compiler_attributes.h"
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  DEFINITIONS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -54,17 +100,19 @@ uint8_t runtime_entropy[POOL_SIZE];
  */
 uint64_t get_session(uint8_t *origin)
 {
-    struct timespec starttime;
-    //Lets figure out when this is as accuralty as possilbe.
-    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &starttime);
     //Take everything about this specific call and merge it into one unique word (2 bytes).
     //User input is combined with the entropy pool state to derive what key material is used for this session.
-    uint64_t session = starttime.tv_nsec ^ (uint64_t) &origin;
+    uint64_t session = jiffies + (uint64_t) &origin;
+
+    //struct timespec starttime;
+    //Lets figure out when this is as accuralty as possilbe.
+    //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &starttime);
 
     //If you xor two strings that are identical they cancle out.
     //we have already taken time ^ address,  xoring another address is less than ideal. 
     //adding an address will make this value more unqiue without cancling an operation.
-    session += (uint64_t)&starttime
+    session ^= (uint64_t) &session;
+
     return session;
 }
 
@@ -79,6 +127,14 @@ int load_file(uint8_t dest[], int len)
      ret = 1;
   }
   return ret;
+}
+
+void xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, int byte_length)
+{
+    for(int i =0; i < len; i++)
+    {
+       dest[i] ^= source[i]; 
+    }
 }
 
 //Copy by bit offset.
@@ -131,9 +187,9 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     //make sure this IV is universally unique, and distinct from any global state.
     //xor_bytes( local_iv, session, 2);
-    local_iv[0] ^= (uint32_t)session;
-    local_iv[1] ^= (uint32_t)*(&session+4);
-
+    //local_iv[0] ^= (uint32_t)session;
+    //local_iv[1] ^= (uint32_t)*(&session+4);
+    xor_bits(local_iv, session, 4);
     //Select the key:
     int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
     //Generate one block of PRNG
@@ -174,9 +230,9 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     //make sure this IV is universally unique, and distinct from any global state.
     //xor_bytes( local_iv, session, 2);
-    local_iv[0] ^= (uint32_t)session;
-    local_iv[1] ^= (uint32_t)*(&session+4);
-
+    //local_iv[0] ^= (uint32_t)session;
+    //local_iv[1] ^= (uint32_t)*(&session+4);
+    xor_bits(local_iv, session, 4);
     //Choose which plaintext input we want to use based off of a hard to guess offset 
     //The iv tells us which input 'image' we chose to start the session:
     int image_entry_point = (((int)*local_iv + entry_point) % POOL_SIZE_BITS);
@@ -204,6 +260,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
         //A new secret key is re-chosen each round, the new IV is used to choose the new key.
         //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
     }
+    //Cover our tracks.
     //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
     //Encrypt our entropy point with the key material derivied in this local session
     AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), chunk);
@@ -253,11 +310,10 @@ u64 get_random_u64(void)
     xor_bits( runtime_entropy + entry_point, anvil, sizeof(anvil));
     mop_entry_point = 0;
   }
-
+  //cover our tracks.
   //No one will know what this entry point was, 
   //or what it's value was before or after invocation.
   entry_point = 0;
-  key_entry_point = 0;
   return anvil;
 }
 
@@ -273,7 +329,7 @@ u32 get_random_u32(void)
   //The caller doesn't know the value of session
   uint64_t session = get_session(&anvil);
   int entry_point = session % POOL_SIZE_BITS;
-  int key_entry_point = (int)*runtime_entropy + entry_point
+  int key_entry_point = (int)*runtime_entropy + entry_point;
   bitcpy( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
 
   //Do we have a good source of hardware random values?
@@ -297,7 +353,7 @@ u32 get_random_u32(void)
     xor_bits( runtime_entropy + entry_point,anvil , sizeof(anvil));
     mop_entry_point = 0;
   }
-  //clear your tracks:
+  //cover our tracks:
   entry_point = 0;
   key_entry_point = 0;
   return anvil;
@@ -379,7 +435,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
       rv = random_get_entropy();
     crng->state[i+4] ^= buf.key[i] ^ rv;
   }
-  
+
   //We used some unclean hardware input, lets mix the pool
   mix_pool_bytes(crng, runtime_entropy, POOL_SIZE);
 
@@ -433,7 +489,7 @@ static ssize_t
 urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
   //The user is expecting to get the best restuls.
-  //Lets start off with a fresh entropy pool for everyone.
+  //Watch out, unlimited is coming through - lets tidy the place up. 
   crng_reseed(file, runtime_etropy);
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
