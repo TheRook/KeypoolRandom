@@ -146,45 +146,60 @@ void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, 
  * device driver (i.e. reading /dev/random)
  */
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
-    //uint32_t    local_key[BLOCK_SIZE];
-    uint8_t    local_iv[BLOCK_SIZE];
-    AesOfbContext   aesOfb; 
-    size_t amountLeft = nbytes;
-    int chunk;
-    //Take everything about this specific call and merge it into one unique word (2 bytes).
-    //User input is combined with the entropy pool state to derive what key material is used for this session.
-    uint64_t session = get_session(__user_buf);
-    //For key scheduling purposes, the entropy pool acts as a kind of twist table.
-    //The pool is circular, so our starting point can be the last element in the array. 
-    int entry_point = session % POOL_SIZE_BITS;
-    bitcpy(local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
-    //make sure this IV is universally unique, and distinct from any global state.
-    (u64)local_iv[0] ^= session;
+    //Check  to see if the request is too small to warrent a block cipher.
+    if(nbytes < 0){
+      return 0;
+    //If we can be fast, lets be fast.
+    }else if(nbytes <= 4){
+      //Dogfood - get one byte from the pool.
+      u32 one_chunk = get_random_u32();
+      memcpy(__user_buf, &one_chunk, nbytes);
+    }else if(nbytes < 8){
+      //Grab a larger chunk
+      u64 two_chunk = get_random_u64();
+      memcpy(__user_buf, &two_chunk, nbytes);
+    }else{
+      //Ok, we need somthing bigger, time for OFB.
 
-    //Sure get_alternate_rand() is optional, but anything helps.
-    //If we add an additionall call to get_alternate_rand() we will;
-    //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
-    (u64)local_iv[8] ^= get_alternate_rand();
+      uint8_t    local_iv[BLOCK_SIZE];
+      AesOfbContext   aesOfb; 
+      size_t amountLeft = nbytes;
+      int chunk;
+      //Take everything about this specific call and merge it into one unique word (2 bytes).
+      //User input is combined with the entropy pool state to derive what key material is used for this session.
+      uint64_t session = get_session(__user_buf);
+      //For key scheduling purposes, the entropy pool acts as a kind of twist table.
+      //The pool is circular, so our starting point can be the last element in the array. 
+      int entry_point = session % POOL_SIZE_BITS;
+      bitcpy(local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
+      //make sure this IV is universally unique, and distinct from any global state.
+      (u64)local_iv[0] ^= session;
 
-    //Select the key:
-    int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
-    //Generate one block of PRNG
-    AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
-    
-    //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-    AesOfbOutput( &aesOfb, __user_buf, nbytes);
+      //Sure get_alternate_rand() is optional, but anything helps.
+      //If we add an additionall call to get_alternate_rand() we will;
+      //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
+      (u64)local_iv[8] ^= get_alternate_rand();
 
-    //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
-    //Encrypt our entropy point with the key material derivied in this local session
-    AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), BLOCK_SIZE);
-    //Zero out memeory to prevent backtracking
-    memzero_explicit(local_iv, sizeof(local_iv));
-    entry_point = 0;
-    key_entry_point = 0;
-    seed = 0;
-    //Cleanup complete 
-    //at this point it should not be possilbe to re-create any part of the PRNG stream used.
-    return nbytes;
+      //Select the key:
+      int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
+      //Generate one block of PRNG
+      AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
+      
+      //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
+      AesOfbOutput( &aesOfb, __user_buf, nbytes);
+
+      //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
+      //Encrypt our entropy point with the key material derivied in this local session
+      AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), BLOCK_SIZE);
+      //Zero out memeory to prevent backtracking
+      memzero_explicit(local_iv, sizeof(local_iv));
+      entry_point = 0;
+      key_entry_point = 0;
+      seed = 0;
+      //Cleanup complete 
+      //at this point it should not be possilbe to re-create any part of the PRNG stream used.
+      return nbytes;
+    }
 }
 
 // This is the /dev/urandom variant.
@@ -213,9 +228,8 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     //get_alternate_rand() optional, but anything helps here.
     //If we add an additionall call to get_alternate_rand() we will;
     //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
-    u64 seed = get_alternate_rand();
-    //xor_bits(local_iv+8, seed, 8);
-    (u64)local_iv[8] ^= seed;
+    (u64)local_iv[8] ^= get_alternate_rand();
+
     //Choose which plaintext input we want to use based off of a hard to guess offset 
     //The iv tells us which input 'image' we chose to start the session:
     int image_entry_point = (((int)*local_iv + entry_point) % POOL_SIZE_BITS);
