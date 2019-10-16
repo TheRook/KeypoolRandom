@@ -159,13 +159,13 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     int entry_point = session % POOL_SIZE_BITS;
     bitcpy(local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     //make sure this IV is universally unique, and distinct from any global state.
-    xor_bits(local_iv, session, 8);
+    (u64)local_iv[0] ^= session;
 
-    //get_alternate_rand() optional, but anything helps here.
+    //Sure get_alternate_rand() is optional, but anything helps.
     //If we add an additionall call to get_alternate_rand() we will;
     //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
-    u64 seed = get_alternate_rand();
-    xor_bits(local_iv+8, seed, 8);
+    (u64)local_iv[8] ^= get_alternate_rand();
+
     //Select the key:
     int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
     //Generate one block of PRNG
@@ -207,14 +207,15 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     
     //make sure this IV is universally unique, and distinct from any global state.
-    xor_bits(local_iv, session, 8);
+    (b64)local_iv[0] ^= session;
+    //xor_bits(local_iv, session, 8);
 
     //get_alternate_rand() optional, but anything helps here.
     //If we add an additionall call to get_alternate_rand() we will;
     //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
     u64 seed = get_alternate_rand();
-    xor_bits(local_iv+8, seed, 8);
-
+    //xor_bits(local_iv+8, seed, 8);
+    (u64)local_iv[8] ^= seed;
     //Choose which plaintext input we want to use based off of a hard to guess offset 
     //The iv tells us which input 'image' we chose to start the session:
     int image_entry_point = (((int)*local_iv + entry_point) % POOL_SIZE_BITS);
@@ -228,6 +229,11 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
         //This routine needs the hardest to guess key in constant time.
         //we add the image_entry_point to avoid using the same (iv, key) combination - which still shouldn't happen.
         int key_entry_point = ((int)*local_iv + image_entry_point) % (POOL_SIZE - BLOCK_SIZE);
+        
+        //Use an outside source to make sure this key is unique.
+        //This is one way we can show that this PRNG stream doesn't have a period
+        //By including an outside source every block, we ensure an unlimited supply of PRNG.
+        (u64)runtime_entropy[key_entry_point] ^= get_alternate_rand();
         //Generate one block of PRNG
         AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
         AesOfbOutput( &aesOfb, local_image, chunk);
@@ -300,7 +306,7 @@ u64 get_random_u64(void)
   if (arch_get_random_seed_long(&seed)) {
      xor_bits(anvil, seed, 0, sizeof(anvil));
      arch_get_random_seed_long(&seed);
-     xor_bits(anvil, seed, 2, sizeof(anvil));
+     xor_bits(anvil, seed, 4, sizeof(anvil));
      arch_get_random_seed_long(&seed);
      //cleanup - remove entry point:
      xor_bits( runtime_entropy + entry_point, seed, sizeof(seed));
@@ -386,7 +392,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   //Globally unique session
   uint64_t session = get_session(&irq);
   //Other itterupts are unlikely to choose our same entry_point
-  int entry_point = session % POOL_SIZE_BITS;
+  int entry_point = session % (POOL_SIZE - 4);
   uint8_t  *fast_pool = this_cpu_ptr(&irq_randomness);
   struct pt_regs    *regs = get_irq_regs();
   unsigned long   now = jiffies;
@@ -411,11 +417,19 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
   //If we have a hardware rand, use it as a OTP
   seed = get_alternate_rand();
-  xor_bits(fast_pool, seed, 0, 4);
-  xor_bits(fast_pool, seed+4, 0, 4);
+  
+  //Seed is 64 bits, so lets squeeze ever bit out of that.
+  (u32)fast_pool[0] ^= seed;
+  (u32)fast_pool[0] ^= seed + 4;
 
+  //Drip the entropy back into the pool
+  (u32)runtime_entropy[entry_point] ^= fast_pool;
+
+  //If we wanted entry_point to be divided by the bit, then we would have to burn extra cycles:
+  //xor_bits(fast_pool, seed, 0, 4);
+  //xor_bits(fast_pool, seed+4, 0, 4);
   //Now add a drop of entropy to the pool - it is 1/POOL_SIZE_BITS chance of an overwrite
-  xor_bits(runtime_entropy, fast_pool, entry_point, fast_pool, 4)
+  //xor_bits(runtime_entropy, fast_pool, entry_point, fast_pool, 4)
 }
 
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
