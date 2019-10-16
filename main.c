@@ -16,47 +16,20 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  IMPORTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#include "types.h"
-#include <linux/utsname.h>
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/string.h>
-#include <linux/fcntl.h>
-#include <linux/slab.h>
-#include <linux/random.h>
-#include <linux/poll.h>
+//#include "types.h"
+//#include <stdio.h>
+//#include <linux/compiler.h>
+#include <linux/types.h>
+//#include <linux/compiler_types.h>
 #include <linux/init.h>
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/interrupt.h>
-#include <linux/mm.h>
-#include <linux/nodemask.h>
-#include <linux/spinlock.h>
-#include <linux/kthread.h>
-#include <linux/percpu.h>
-#include <linux/cryptohash.h>
-#include <linux/fips.h>
-#include <linux/freezer.h>
-#include <linux/ptrace.h>
-#include <linux/workqueue.h>
-#include <linux/irq.h>
-#include <linux/ratelimit.h>
-#include <linux/syscalls.h>
-#include <linux/completion.h>
-#include <linux/uuid.h>
-#include <crypto/chacha.h>
+#include <linux/kdb.h>
+#include <include/linux/jiffies.h>
+#include <include/linux/log2.h>
+#include <linux/compiler_attributes.h>
+//#include <trace/events/random.h>
+//#include </include/linux/lcm.h>
 
-#include <asm/processor.h>
-#include <linux/uaccess.h>
-#include <asm/irq.h>
-#include <asm/irq_regs.h>
-#include <asm/io.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/random.h>
-
-#include <stdio.h>
 #include <stdlib.h>
 //#include <stdint.h>
 //#include <string.h>
@@ -184,12 +157,15 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //For key scheduling purposes, the entropy pool acts as a kind of twist table.
     //The pool is circular, so our starting point can be the last element in the array. 
     int entry_point = session % POOL_SIZE_BITS;
-    bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
+    bitcpy(local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     //make sure this IV is universally unique, and distinct from any global state.
-    //xor_bytes( local_iv, session, 2);
-    //local_iv[0] ^= (uint32_t)session;
-    //local_iv[1] ^= (uint32_t)*(&session+4);
-    xor_bits(local_iv, session, 4);
+    xor_bits(local_iv, session, 8);
+
+    //get_alternate_rand() optional, but anything helps here.
+    //If we add an additionall call to get_alternate_rand() we will;
+    //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
+    u64 seed = get_alternate_rand();
+    xor_bits(local_iv+8, seed, 8);
     //Select the key:
     int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
     //Generate one block of PRNG
@@ -205,6 +181,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     memzero_explicit(local_iv, sizeof(local_iv));
     entry_point = 0;
     key_entry_point = 0;
+    seed = 0;
     //Cleanup complete 
     //at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
@@ -228,11 +205,16 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     //The pool is circular, so our starting point can be the last element in the array. 
     int entry_point = session % POOL_SIZE_BITS;
     bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
+    
     //make sure this IV is universally unique, and distinct from any global state.
-    //xor_bytes( local_iv, session, 2);
-    //local_iv[0] ^= (uint32_t)session;
-    //local_iv[1] ^= (uint32_t)*(&session+4);
-    xor_bits(local_iv, session, 4);
+    xor_bits(local_iv, session, 8);
+
+    //get_alternate_rand() optional, but anything helps here.
+    //If we add an additionall call to get_alternate_rand() we will;
+    //Increase entropy, introduce uncertity, and reduce already impossilbe collisions.
+    u64 seed = get_alternate_rand();
+    xor_bits(local_iv+8, seed, 8);
+
     //Choose which plaintext input we want to use based off of a hard to guess offset 
     //The iv tells us which input 'image' we chose to start the session:
     int image_entry_point = (((int)*local_iv + entry_point) % POOL_SIZE_BITS);
@@ -266,8 +248,38 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), chunk);
     memzero_explicit(local_image, sizeof(local_image));
     memzero_explicit(local_iv, sizeof(local_iv));
+    seed = 0;
+    entry_point;
+    image_entry_point = 0;
+    key_entry_point = 0;
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
+}
+
+/*
+ * There are many times when we need another opinion. 
+ * Ideally that would come from another source, such as arch_get_random_seed_long()
+ * When we don't have a arch_get_random_seed_long, then we'll use ourselves as a source.
+ * 
+ * Failure is not an option.
+ */
+u64 get_alternate_rand(void)
+{
+  u64 a_few_words = 0;
+  //Try every source we know of. Taken from random.c
+  if(!arch_get_random_seed_long(&a_few_words))
+  {
+      if(!arch_get_random_long(&a_few_words))
+      {
+         a_few_words = random_get_entropy();
+      }
+  }
+  if(!a_few_words)
+  {
+    //Well we know one source that won't let us down:
+    a_few_words = get_random_u64();
+  }
+  return a_few_words;
 }
 
 /*
@@ -385,6 +397,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   int     credit = 0;
 
   //Taken from random.c - all O(1) operations
+  //The interrupt + time gives us 4 bytes.
   if (cycles == 0)
     cycles = get_reg(fast_pool, regs);
   c_high = (sizeof(cycles) > 4) ? cycles >> 32 : 0;
@@ -397,11 +410,9 @@ void add_interrupt_randomness(int irq, int irq_flags)
     get_reg(fast_pool, regs);
 
   //If we have a hardware rand, use it as a OTP
-  if (arch_get_random_seed_long(&seed)) {
-     xor_bits(fast_pool, seed, 0, 2);
-     arch_get_random_seed_long(&seed);
-     xor_bits(fast_pool, seed, 2, 4);
-  }
+  seed = get_alternate_rand();
+  xor_bits(fast_pool, seed, 0, 4);
+  xor_bits(fast_pool, seed+4, 0, 4);
 
   //Now add a drop of entropy to the pool - it is 1/POOL_SIZE_BITS chance of an overwrite
   xor_bits(runtime_entropy, fast_pool, entry_point, fast_pool, 4)
@@ -430,9 +441,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   }
   for (i = 0; i < 8; i++) {
     unsigned long rv;
-    if (!arch_get_random_seed_long(&rv) &&
-        !arch_get_random_long(&rv))
-      rv = random_get_entropy();
+    rv = get_alternate_rand();
     crng->state[i+4] ^= buf.key[i] ^ rv;
   }
 
