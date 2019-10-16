@@ -147,17 +147,19 @@ void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, 
  */
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //Check  to see if the request is too small to warrent a block cipher.
-    if(nbytes < 0){
+    if(nbytes <= 0){
       return 0;
     //If we can be fast, lets be fast.
     }else if(nbytes <= 4){
       //Dogfood - get one byte from the pool.
       u32 one_chunk = get_random_u32();
       memcpy(__user_buf, &one_chunk, nbytes);
+      return nbytes;
     }else if(nbytes < 8){
       //Grab a larger chunk
       u64 two_chunk = get_random_u64();
       memcpy(__user_buf, &two_chunk, nbytes);
+      return nbytes;
     }else{
       //Ok, we need somthing bigger, time for OFB.
 
