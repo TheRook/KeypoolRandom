@@ -67,41 +67,44 @@
 uint8_t runtime_entropy[POOL_SIZE];
 
 
-/* The session is a word (2-bytes) that represents who and where.
- * One caller cannot try to fill the same bucket at the same time.
- * Due to this pidgen-hole priciple, the resulting session will be unique for all users.
+/* 
+ * A Session ID must be unique no matter how many threads invoke it at the same time.
+ * To do this, we capture the 'who', 'what' 'when' and 'where' of the request into one value
+ * Due to the pidgen-hole pirciple any caller who fills these requiremnets, must except to get the same result.
+ * If the caller is the same person and getting a session id at the same time 
+ * - then they should expect to be identified in the same way, that what the device does.
+ *
  */
-uint64_t get_session(void *origin_address, void return_instruction_pointer)
+u64 get_session(void *origin_address, void consumer_ip)
 {
   u64 anvil;
 
-  //Take everything about this specific call and merge it into one u64.
+  //we have an address on the stack of where the data is going (origin_address)
+  //we have the instruciton pointer of who invoked the device driver (consumer_ip)
+  //We have our the 'jiffies' which is when the session was created.
+  //We have our stack pointer which is what we are using to generate the session. 
+  //When combining the; what, who, when, where we have a globally unique u64.
 
   //User input is combined with the entropy pool state to derive what key material is used for this session.
   //The return address and current insturciton pointer are _RET_IP_ and _THIS_IP_ come from kernel.h:
   //https://elixir.bootlin.com/linux/v3.0/source/include/linux/kernel.h#L80
-  //each line gets us 64 bits.
+  //_THIS_IP_ is always going to be the same because &get_session() is in a static location in memory
 
-  //Taking the value of the &anvil is like taking the ESP, and &origin was at once point the ESP of the caller.
-  //return_instruction_pointer is taken from the external interface, to see who called us, and capture that value. 
-  
   //Is this larger than 32 bit?
   if(sizeof(&origin_address) > 4)
   {
-    anvil  = (return_instruction_pointer + &origin_address);
-    anvil ^= (&origin_address + &anvil);
+    anvil  = (u64)consumer_ip ^ &origin_address;
+    anvil ^=  &origin_address ^ &anvil;
   }else{
     //These addresses are small so we concat.
-    anvil  = (return_instruction_pointer << 32 | &origin_address);
-    anvil ^= (&origin_address << 32 | &anvil);
+    anvil  = ((u32)consumer_ip << 32 | &origin_address);
+    anvil ^=  (&origin_address << 32 | &anvil);
   }
-
+  //Anvil and jiffies shouldn't be anything alike
+  //This xor operation will preserve uniqueness. 
   anvil ^= jiffies;
 
-  //If you xor two strings that are identical they cancle out.
-  //we have already taken time ^ address,  xoring another address is less than ideal. 
-  //adding an address will make this value more unqiue without cancling an operation.
-
+  //A globally unique (maybe universally uniqe) session id has been minted.
   return anvil;
 }
 
