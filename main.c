@@ -93,11 +93,14 @@ u64 get_session(void *origin_address, void consumer_ip)
   //Is this larger than 32 bit?
   if(sizeof(&origin_address) > 4)
   {
-    anvil  = (u64)consumer_ip ^ &origin_address;
-    anvil ^=  &origin_address ^ &anvil;
+    //all 64 bit values adding uniquness to the anvil.
+    anvil  = (u64)consumer_ip ^ &origin_address ^ &anvil;
   }else{
     //These addresses are small so we concat.
-    anvil  = ((u32)consumer_ip << 32 | &origin_address);
+    //_THIS_IP_ will be the same for the duration of the runtime. 
+    //However, _THIS_IP_ is the instruction pointer which is distict for this boot 
+    // - and we use this instruction pointer as a bitmast make the lower bits unique.
+    anvil  = ((u32)consumer_ip << 32 | (&origin_address ^ _THIS_IP_));
     anvil ^=  (&origin_address << 32 | &anvil);
   }
   //Anvil and jiffies shouldn't be anything alike
@@ -181,7 +184,6 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       return nbytes;
     }else{
       //Ok, we need somthing bigger, time for OFB.
-
       uint8_t    local_iv[BLOCK_SIZE];
       AesOfbContext   aesOfb; 
       size_t amountLeft = nbytes;
@@ -203,6 +205,14 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
 
       //Select the key:
       int key_entry_point = ((int)*local_iv + entry_point) % (POOL_SIZE - BLOCK_SIZE);
+
+      // For AES-OFB the final key is iv^key 
+      // - so we wan't to make sure key_entry_point != entry_point
+      //Fall to either side, don't prefer one side.
+      if(key_entry_point == entry_point){
+        key_entry_point += (key_entry_point % 2) ? 1 : -1;
+      }
+
       //Generate one block of PRNG
       AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
       
@@ -264,7 +274,12 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
         //This routine needs the hardest to guess key in constant time.
         //we add the image_entry_point to avoid using the same (iv, key) combination - which still shouldn't happen.
         int key_entry_point = ((int)*local_iv + image_entry_point) % (POOL_SIZE - BLOCK_SIZE);
-        
+        // For AES-OFB the final key is iv^key 
+        // - so we wan't to make sure key_entry_point != entry_point
+        //Fall to either side, don't prefer one side.
+        if(key_entry_point == entry_point){
+          key_entry_point += (key_entry_point % 2) ? 1 : -1;
+        }
         //Use an outside source to make sure this key is unique.
         //This is one way we can show that this PRNG stream doesn't have a period
         //By including an outside source every block, we ensure an unlimited supply of PRNG.
@@ -331,23 +346,23 @@ u64 get_alternate_rand(void)
 
 u64 get_random_u64(void)
 {
-  long seed;
   u64 anvil;
   u64 mop;
+  u64 seed;
   uint64_t session = get_session(&anvil, _RET_IP_);
   int entry_point = session % POOL_SIZE_BITS;
   bitcpy( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
 
   if (arch_get_random_seed_long(&seed)) {
     //Ok great, lets start with this value from hardware
+    anvil ^= seed;
     //We don't know if it is good or bad.
-    anvil = seed;
     //Lets take some PRNG that we produced and add it:
-    xor_bits(&anvil, runtime_entropy + entry_point, sizeof(anvil));
+    //xor_bits(&anvil, runtime_entropy + entry_point, sizeof(anvil));
     //cleanup - remove entry point:
     arch_get_random_seed_long(&mop);
   } else {
-    anvil = (u64) runtime_entropy + entry_point;
+    //anvil = (u64) runtime_entropy + entry_point;
 
     // XOR over something globally unique.
     // anything in runtime_entropy could be in use.
@@ -356,6 +371,12 @@ u64 get_random_u64(void)
 
     // This jumptable pattern follows a similar pattern to the AES counterpart.
     int key_entry_point = (int)anvil % POOL_SIZE_BITS;
+
+    //If we choose the same point then we xor the same values.
+    //Fall to either side, don't prefer one side.
+    if(key_entry_point == entry_point){
+      key_entry_point += (key_entry_point % 2) ? 1 : -1;
+    }
     //add this source
     xor_bits(&anvil, runtime_entropy, key_entry_point, sizeof(anvil));
 
@@ -395,12 +416,23 @@ u32 get_random_u32(void)
      //cleanup - remove entry pointer   
   } else {
     // XOR over something globally unique.
+    // anything in runtime_entropy could be in use.
     // The session isn't known to the caller.
-    xor_bits( &anvil, runtime_entropy, entry_point, session, sizeof(anvil));
-    // add the next chunk:
-    xor_bits( &anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
+    anvil ^= session;
+
+    // This jumptable pattern follows a similar pattern to the AES counterpart.
+    int key_entry_point = (int)anvil % POOL_SIZE_BITS;
+
+    //If we choose the same point then we xor the same values.
+    //Fall to either side, don't prefer one side.
+    if(key_entry_point == entry_point){
+      key_entry_point += (key_entry_point % 2) ? 1 : -1;
+    }
+    //add this source
+    xor_bits(&anvil, runtime_entropy, key_entry_point, sizeof(anvil));
+
     //Get another point of PRNG to scrub the keypool.
-    mop = (u32)runtime_entropy + (anvil % (POOL_SIZE_BITS/8))
+    mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8))
   }
   //cover our tracks, remove entry point
   xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
@@ -450,8 +482,11 @@ void add_interrupt_randomness(int irq, int irq_flags)
   fast_pool[3] ^= (sizeof(ip) > 4) ? ip >> 32 :
     get_reg(fast_pool, regs);
 
-  //If we have a hardware rand, use it as a OTP
-  //Only a single call to an outside random source is made by add_interrupt_randomness()
+  //fast_pool has captured all of the sources it can.
+  //Mixing fast_pool doesn't make it more unique...
+
+  //If we have a hardware rand, use it as a OTP, which will make it harder to guess.
+  //add_interrupt_randomness() only makes a single call to an outside random source
   seed = get_alternate_rand();
   
   //Seed is 64 bits, so lets squeeze ever bit out of that.
