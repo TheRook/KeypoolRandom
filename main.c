@@ -71,32 +71,36 @@ uint8_t runtime_entropy[POOL_SIZE];
  * One caller cannot try to fill the same bucket at the same time.
  * Due to this pidgen-hole priciple, the resulting session will be unique for all users.
  */
-uint64_t get_session(void *origin, void *return_instruction_pointer)
+uint64_t get_session(void *origin_address, void return_instruction_pointer)
 {
   u64 anvil;
-  //Take everything about this specific call and merge it into one unique word (2 bytes).
-  //User input is combined with the entropy pool state to derive what key material is used for this session.
 
+  //Take everything about this specific call and merge it into one u64.
+
+  //User input is combined with the entropy pool state to derive what key material is used for this session.
   //The return address and current insturciton pointer are _RET_IP_ and _THIS_IP_ come from kernel.h:
   //https://elixir.bootlin.com/linux/v3.0/source/include/linux/kernel.h#L80
   //each line gets us 64 bits.
-  anvil  = (sizeof(&origin) > 4) ? return_instruction_pointer + &origin : (return_instruction_pointer << 32 | &origin);
-  anvil ^= (sizeof(&origin) > 4) ? &origin + &anvil : (&origin << 32 | &anvil);
+
+  //Taking the value of the &anvil is like taking the ESP, and &origin was at once point the ESP of the caller.
+  //return_instruction_pointer is taken from the external interface, to see who called us, and capture that value. 
+  
+  //Is this larger than 32 bit?
+  if(sizeof(&origin_address) > 4)
+  {
+    anvil  = (return_instruction_pointer + &origin_address);
+    anvil ^= (&origin_address + &anvil);
+  }else{
+    //These addresses are small so we concat.
+    anvil  = (return_instruction_pointer << 32 | &origin_address);
+    anvil ^= (&origin_address << 32 | &anvil);
+  }
+
   anvil ^= jiffies;
 
   //If you xor two strings that are identical they cancle out.
   //we have already taken time ^ address,  xoring another address is less than ideal. 
   //adding an address will make this value more unqiue without cancling an operation.
-
-  return anvil;
-}
-
-
-
-u64 new_session(void * origin)
-{
-  u64 anvil;
-
 
   return anvil;
 }
@@ -424,9 +428,10 @@ void add_interrupt_randomness(int irq, int irq_flags)
   uint8_t  *fast_pool = this_cpu_ptr(&irq_randomness);
   struct pt_regs    *regs = get_irq_regs();
   unsigned long   now = jiffies;
-  cycles_t    cycles = random_get_entropy();
+  //irq_flags contains a few bits, and every bit counts.
+  cycles_t    cycles = irq_flags;
   __u32     c_high, j_high;
-  __u64     ip;
+  __u64     ip = _RET_IP_;
   unsigned long   seed;
   int     credit = 0;
 
@@ -438,22 +443,22 @@ void add_interrupt_randomness(int irq, int irq_flags)
   j_high = (sizeof(now) > 4) ? now >> 32 : 0;
   fast_pool[0] ^= cycles ^ j_high ^ irq;
   fast_pool[1] ^= now ^ c_high;
-  ip = regs ? instruction_pointer(regs) : _RET_IP_;
   fast_pool[2] ^= ip;
   fast_pool[3] ^= (sizeof(ip) > 4) ? ip >> 32 :
     get_reg(fast_pool, regs);
 
   //If we have a hardware rand, use it as a OTP
+  //Only a single call to an outside random source is made by add_interrupt_randomness()
   seed = get_alternate_rand();
   
   //Seed is 64 bits, so lets squeeze ever bit out of that.
-  (u32)fast_pool[0] ^= seed;
-  (u32)fast_pool[0] ^= seed + 4;
-
+  (u64)fast_pool[0] ^= seed;
+  (u64)fast_pool[2] ^= session
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  (u32)runtime_entropy[entry_point] ^= fast_pool;
+  (u64)runtime_entropy[entry_point] ^= fast_pool[0];
+  (u64)runtime_entropy[entry_point+2] ^= fast_pool[2];
 
   //If we wanted entry_point to be divided by the bit, then we would have to burn extra cycles:
   //xor_bits(fast_pool, seed, 0, 4);
