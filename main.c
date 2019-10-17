@@ -94,13 +94,13 @@ u64 get_session(void *origin_address, void consumer_ip)
   if(sizeof(&origin_address) > 4)
   {
     //all 64 bit values adding uniquness to the anvil.
-    anvil  = (u64)consumer_ip ^ &origin_address ^ &anvil;
+    anvil ^= (u64)consumer_ip ^ &origin_address ^ &anvil;
   }else{
     //These addresses are small so we concat.
     //_THIS_IP_ will be the same for the duration of the runtime. 
     //However, _THIS_IP_ is the instruction pointer which is distict for this boot 
     // - and we use this instruction pointer as a bitmast make the lower bits unique.
-    anvil  = ((u32)consumer_ip << 32 | (&origin_address ^ _THIS_IP_));
+    anvil ^= ((u32)consumer_ip << 32 | (&origin_address ^ _THIS_IP_));
     anvil ^=  (&origin_address << 32 | &anvil);
   }
   //Anvil and jiffies shouldn't be anything alike
@@ -168,7 +168,9 @@ void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, 
  * device driver (i.e. reading /dev/random)
  */
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
-    //Check  to see if the request is too small to warrent a block cipher.
+    //Check  to see if the request is too small to warrent generating a full block.
+    //Speed is an important part of this driver
+    //get_random_u32 and get_random_u64 where written to be secure
     if(nbytes <= 0){
       return 0;
     //If we can be fast, lets be fast.
@@ -321,19 +323,19 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
  */
 u64 get_alternate_rand(void)
 {
-  u64 a_few_words = 0;
+  u64 a_few_words;
   //Try every source we know of. Taken from random.c
   if(!arch_get_random_seed_long(&a_few_words))
   {
       if(!arch_get_random_long(&a_few_words))
       {
-         a_few_words = random_get_entropy();
+         a_few_words ^= random_get_entropy();
       }
   }
   if(!a_few_words)
   {
     //Well we know one source that won't let us down:
-    a_few_words = get_random_u64();
+    a_few_words ^= get_random_u64();
   }
   return a_few_words;
 }
@@ -351,23 +353,21 @@ u64 get_random_u64(void)
   u64 seed;
   uint64_t session = get_session(&anvil, _RET_IP_);
   int entry_point = session % POOL_SIZE_BITS;
-  bitcpy( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
+  xor_bits( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
+
+  // XOR over something globally unique.
+  // anything in runtime_entropy could be in use.
+  // Some of the session isn't known to the caller.
+  anvil ^= session;
 
   if (arch_get_random_seed_long(&seed)) {
     //Ok great, lets start with this value from hardware
+    //We don't know if it is good or bad, but it helps.
     anvil ^= seed;
-    //We don't know if it is good or bad.
-    //Lets take some PRNG that we produced and add it:
-    //xor_bits(&anvil, runtime_entropy + entry_point, sizeof(anvil));
+
     //cleanup - remove entry point:
     arch_get_random_seed_long(&mop);
   } else {
-    //anvil = (u64) runtime_entropy + entry_point;
-
-    // XOR over something globally unique.
-    // anything in runtime_entropy could be in use.
-    // The session isn't known to the caller.
-    anvil ^= session;
 
     // This jumptable pattern follows a similar pattern to the AES counterpart.
     int key_entry_point = (int)anvil % POOL_SIZE_BITS;
@@ -381,7 +381,10 @@ u64 get_random_u64(void)
     xor_bits(&anvil, runtime_entropy, key_entry_point, sizeof(anvil));
 
     //Get another point of PRNG to scrub the keypool.
-    mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8))
+    mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8));
+
+    //Make sure this mop is unique, more unique is more clean.
+    mop ^= session;
   }
   //cover our tracks, remove entry point
   xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
@@ -405,7 +408,13 @@ u32 get_random_u32(void)
   uint64_t session = get_session(&anvil, _RET_IP_);
   int entry_point = session % POOL_SIZE_BITS;
   int key_entry_point = (int)*runtime_entropy + entry_point;
-  bitcpy( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
+  xor_bits( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
+
+  // XOR over something globally unique.
+  // anything in runtime_entropy could be in use.
+  // Some of the session isn't known to the caller.
+  anvil ^= (u32)session;
+  anvil ^= (u32)*(&session+4);
 
   //Do we have a good source of hardware random values?
   if (arch_get_random_seed_long(&seed)) {
@@ -415,11 +424,6 @@ u32 get_random_u32(void)
      mop = (seed << 32);
      //cleanup - remove entry pointer   
   } else {
-    // XOR over something globally unique.
-    // anything in runtime_entropy could be in use.
-    // The session isn't known to the caller.
-    anvil ^= session;
-
     // This jumptable pattern follows a similar pattern to the AES counterpart.
     int key_entry_point = (int)anvil % POOL_SIZE_BITS;
 
@@ -433,6 +437,9 @@ u32 get_random_u32(void)
 
     //Get another point of PRNG to scrub the keypool.
     mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8))
+
+    //Make sure this mop is unique, more unique is more clean.
+    mop ^= session;
   }
   //cover our tracks, remove entry point
   xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
@@ -468,7 +475,6 @@ void add_interrupt_randomness(int irq, int irq_flags)
   __u32     c_high, j_high;
   __u64     ip = _RET_IP_;
   unsigned long   seed;
-  int     credit = 0;
 
   //Taken from random.c - all O(1) operations
   //The interrupt + time gives us 4 bytes.
@@ -487,7 +493,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
   //If we have a hardware rand, use it as a OTP, which will make it harder to guess.
   //add_interrupt_randomness() only makes a single call to an outside random source
-  seed = get_alternate_rand();
+  seed ^= get_alternate_rand();
   
   //Seed is 64 bits, so lets squeeze ever bit out of that.
   (u64)fast_pool[0] ^= seed;
@@ -528,7 +534,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   }
   for (i = 0; i < 8; i++) {
     unsigned long rv;
-    rv = get_alternate_rand();
+    rv ^= get_alternate_rand();
     crng->state[i+4] ^= buf.key[i] ^ rv;
   }
 
