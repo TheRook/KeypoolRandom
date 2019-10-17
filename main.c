@@ -71,22 +71,34 @@ uint8_t runtime_entropy[POOL_SIZE];
  * One caller cannot try to fill the same bucket at the same time.
  * Due to this pidgen-hole priciple, the resulting session will be unique for all users.
  */
-uint64_t get_session(uint8_t *origin)
+uint64_t get_session(void *origin, void *return_instruction_pointer)
 {
-    //Take everything about this specific call and merge it into one unique word (2 bytes).
-    //User input is combined with the entropy pool state to derive what key material is used for this session.
-    uint64_t session = jiffies + (uint64_t) &origin;
+  u64 anvil;
+  //Take everything about this specific call and merge it into one unique word (2 bytes).
+  //User input is combined with the entropy pool state to derive what key material is used for this session.
 
-    //struct timespec starttime;
-    //Lets figure out when this is as accuralty as possilbe.
-    //clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &starttime);
+  //The return address and current insturciton pointer are _RET_IP_ and _THIS_IP_ come from kernel.h:
+  //https://elixir.bootlin.com/linux/v3.0/source/include/linux/kernel.h#L80
+  //each line gets us 64 bits.
+  anvil  = (sizeof(&origin) > 4) ? return_instruction_pointer + &origin : (return_instruction_pointer << 32 | &origin);
+  anvil ^= (sizeof(&origin) > 4) ? &origin + &anvil : (&origin << 32 | &anvil);
+  anvil ^= jiffies;
 
-    //If you xor two strings that are identical they cancle out.
-    //we have already taken time ^ address,  xoring another address is less than ideal. 
-    //adding an address will make this value more unqiue without cancling an operation.
-    session ^= (uint64_t) &session;
+  //If you xor two strings that are identical they cancle out.
+  //we have already taken time ^ address,  xoring another address is less than ideal. 
+  //adding an address will make this value more unqiue without cancling an operation.
 
-    return session;
+  return anvil;
+}
+
+
+
+u64 new_session(void * origin)
+{
+  u64 anvil;
+
+
+  return anvil;
 }
 
 int load_file(uint8_t dest[], int len)
@@ -155,7 +167,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       u32 one_chunk = get_random_u32();
       memcpy(__user_buf, &one_chunk, nbytes);
       return nbytes;
-    }else if(nbytes < 8){
+    }else if(nbytes <= 8){
       //Grab a larger chunk
       u64 two_chunk = get_random_u64();
       memcpy(__user_buf, &two_chunk, nbytes);
@@ -169,7 +181,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       int chunk;
       //Take everything about this specific call and merge it into one unique word (2 bytes).
       //User input is combined with the entropy pool state to derive what key material is used for this session.
-      uint64_t session = get_session(__user_buf);
+      uint64_t session = get_session(__user_buf, _RET_IP_);
       //For key scheduling purposes, the entropy pool acts as a kind of twist table.
       //The pool is circular, so our starting point can be the last element in the array. 
       int entry_point = session % POOL_SIZE_BITS;
@@ -217,7 +229,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     int chunk;
     //Take everything about this specific call and merge it into one unique word (2 bytes).
     //User input is combined with the entropy pool state to derive what key material is used for this session.
-    uint64_t session = get_session(__user_buf);
+    uint64_t session = get_session(__user_buf, _RET_IP_);
     //For key scheduling purposes, the entropy pool acts as a kind of twist table.
     //The pool is circular, so our starting point can be the last element in the array. 
     int entry_point = session % POOL_SIZE_BITS;
@@ -314,40 +326,41 @@ u64 get_random_u64(void)
 {
   long seed;
   u64 anvil;
-  int mop_entry_point;
-  uint64_t session = get_session(&anvil);
+  u64 mop;
+  uint64_t session = get_session(&anvil, _RET_IP_);
   int entry_point = session % POOL_SIZE_BITS;
   bitcpy( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
 
   if (arch_get_random_seed_long(&seed)) {
-     xor_bits(anvil, seed, 0, sizeof(anvil));
-     arch_get_random_seed_long(&seed);
-     xor_bits(anvil, seed, 4, sizeof(anvil));
-     arch_get_random_seed_long(&seed);
-     //cleanup - remove entry point:
-     xor_bits( runtime_entropy + entry_point, seed, sizeof(seed));
-     //double-tap to get rid of the lower bits:
-     arch_get_random_seed_long(&seed);
-     //cleanup - remove entry point:
-     xor_bits( runtime_entropy + entry_point + sizeof(seed), seed, sizeof(seed));
+    //Ok great, lets start with this value from hardware
+    //We don't know if it is good or bad.
+    anvil = seed;
+    //Lets take some PRNG that we produced and add it:
+    xor_bits(&anvil, runtime_entropy + entry_point, sizeof(anvil));
+    //cleanup - remove entry point:
+    arch_get_random_seed_long(&mop);
   } else {
+    anvil = (u64) runtime_entropy + entry_point;
+
     // XOR over something globally unique.
+    // anything in runtime_entropy could be in use.
     // The session isn't known to the caller.
+    anvil ^= session;
+
     // This jumptable pattern follows a similar pattern to the AES counterpart.
-    xor_bits( anvil, runtime_entropy, entry_point, session, sizeof(anvil));
-    // add the next chunk:
-    xor_bits( anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
-    //Get another point of PRNG to scrub this value.
-    mop_entry_point =  anvil % POOL_SIZE_BITS;
-    xor_bits( anvil, runtime_entropy + mop_entry_point, sizeof(anvil));
-    //cleanup - remove entry point
-    xor_bits( runtime_entropy + entry_point, anvil, sizeof(anvil));
-    mop_entry_point = 0;
+    int key_entry_point = (int)anvil % POOL_SIZE_BITS;
+    //add this source
+    xor_bits(&anvil, runtime_entropy, key_entry_point, sizeof(anvil));
+
+    //Get another point of PRNG to scrub the keypool.
+    mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8))
   }
-  //cover our tracks.
-  //No one will know what this entry point was, 
-  //or what it's value was before or after invocation.
+  //cover our tracks, remove entry point
+  xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
   entry_point = 0;
+  key_entry_point = 0;
+  //clean the mop
+  mop = 0;
   return anvil;
 }
 
@@ -361,7 +374,7 @@ u32 get_random_u32(void)
   long seed;
   int mop_entry_point;
   //The caller doesn't know the value of session
-  uint64_t session = get_session(&anvil);
+  uint64_t session = get_session(&anvil, _RET_IP_);
   int entry_point = session % POOL_SIZE_BITS;
   int key_entry_point = (int)*runtime_entropy + entry_point;
   bitcpy( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
@@ -370,28 +383,27 @@ u32 get_random_u32(void)
   if (arch_get_random_seed_long(&seed)) {
      //Only 32 bits needed
      xor_bits(&anvil, seed, 0, sizeof(anvil));
-     //Get another chunk to fix the keypool:
-     arch_get_random_seed_long(&seed);
-     //cleanup - remove entry point
-     xor_bits( runtime_entropy + entry_point, seed, sizeof(anvil));
+     //The other 32 bits are used for cleanup. 
+     mop = (seed << 32);
+     //cleanup - remove entry pointer   
   } else {
     // XOR over something globally unique.
     // The session isn't known to the caller.
     xor_bits( &anvil, runtime_entropy, entry_point, session, sizeof(anvil));
     // add the next chunk:
     xor_bits( &anvil, runtime_entropy + entry_point + sizeof(anvil), sizeof(anvil));
-    //Get another point of PRNG to scrub this value.
-    mop_entry_point =  anvil % POOL_SIZE_BITS;
-    xor_bits( &anvil, runtime_entropy + mop_entry_point, sizeof(anvil));
-    //cleanup - remove entry point
-    xor_bits( runtime_entropy + entry_point,anvil , sizeof(anvil));
-    mop_entry_point = 0;
+    //Get another point of PRNG to scrub the keypool.
+    mop = (u32)runtime_entropy + (anvil % (POOL_SIZE_BITS/8))
   }
-  //cover our tracks:
+  //cover our tracks, remove entry point
+  xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
   entry_point = 0;
   key_entry_point = 0;
+  //clean the mop
+  mop = 0;
   return anvil;
 }
+
 
 /* This function is in fact called more times than I have ever used a phone.
  * lets keep this funciton as light as possilbe, and move more weight to extract_crng_user()
@@ -406,7 +418,7 @@ u32 get_random_u32(void)
 void add_interrupt_randomness(int irq, int irq_flags)
 {
   //Globally unique session
-  uint64_t session = get_session(&irq);
+  uint64_t session = get_session(&irq, _RET_IP_);
   //Other itterupts are unlikely to choose our same entry_point
   int entry_point = session % (POOL_SIZE - 4);
   uint8_t  *fast_pool = this_cpu_ptr(&irq_randomness);
@@ -438,7 +450,9 @@ void add_interrupt_randomness(int irq, int irq_flags)
   (u32)fast_pool[0] ^= seed;
   (u32)fast_pool[0] ^= seed + 4;
 
-  //Drip the entropy back into the pool
+
+  //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
+  //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
   (u32)runtime_entropy[entry_point] ^= fast_pool;
 
   //If we wanted entry_point to be divided by the bit, then we would have to burn extra cycles:
