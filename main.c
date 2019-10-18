@@ -11,6 +11,13 @@
 // to run:
 // ./poolrand
 // 
+//todo:
+// replace locks in extract_entropy extract_entropy_user, and consider account() 
+
+
+//Locks liberated:
+//
+
 
 // remove _crng_backtrack_protect - it is all protected from backtracks.
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -66,29 +73,37 @@
 //Global runtime entropy
 uint8_t runtime_entropy[POOL_SIZE];
 
+#ifndef __frontdoor_key
+  //#ifdef CONFIG_X86_64
+  #define __frontdoor_key( new_key, origin_address )(new_key = (u64)new_key ^ &origin_address ^ &new_key ^ _RET_IP_ ^ _THIS_IP_ )
+  //#else
+  // #define 
+  //#endif
+#endif
+
 
 /* 
- * A Session ID must be unique no matter how many threads invoke it at the same time.
+ * A keyverse ID must be unique no matter how many threads invoke it at the same time.
  * To do this, we capture the 'who', 'what' 'when' and 'where' of the request into one value
  * Due to the pidgen-hole pirciple any caller who fills these requiremnets, must except to get the same result.
- * If the caller is the same person and getting a session id at the same time 
+ * If the caller is the same person and getting a keyverse id at the same time 
  * - then they should expect to be identified in the same way, that what the device does.
  *
  */
-u64 get_session(void *origin_address, void consumer_ip)
+u64 make_keyverse(void *origin_address, void consumer_ip)
 {
   u64 anvil;
 
   //we have an address on the stack of where the data is going (origin_address)
   //we have the instruciton pointer of who invoked the device driver (consumer_ip)
-  //We have our the 'jiffies' which is when the session was created.
-  //We have our stack pointer which is what we are using to generate the session. 
+  //We have our the 'jiffies' which is when the keyverse was created.
+  //We have our stack pointer which is what we are using to generate the keyverse. 
   //When combining the; what, who, when, where we have a globally unique u64.
 
-  //User input is combined with the entropy pool state to derive what key material is used for this session.
+  //User input is combined with the entropy pool state to derive what key material is used for this keyverse.
   //The return address and current insturciton pointer are _RET_IP_ and _THIS_IP_ come from kernel.h:
   //https://elixir.bootlin.com/linux/v3.0/source/include/linux/kernel.h#L80
-  //_THIS_IP_ is always going to be the same because &get_session() is in a static location in memory
+  //_THIS_IP_ is always going to be the same because &make_keyverse() is in a static location in memory
 
   //Is this larger than 32 bit?
   if(sizeof(&origin_address) > 4)
@@ -107,7 +122,7 @@ u64 get_session(void *origin_address, void consumer_ip)
   //This xor operation will preserve uniqueness. 
   anvil ^= jiffies;
 
-  //A globally unique (maybe universally uniqe) session id has been minted.
+  //A globally unique (maybe universally uniqe) keyverse id has been minted.
   return anvil;
 }
 
@@ -191,14 +206,16 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       size_t amountLeft = nbytes;
       int chunk;
       //Take everything about this specific call and merge it into one unique word (2 bytes).
-      //User input is combined with the entropy pool state to derive what key material is used for this session.
-      uint64_t session = get_session(__user_buf, _RET_IP_);
+      //User input is combined with the entropy pool state to derive what key material is used for this keyverse.
+      uint64_t keyverse = make_keyverse(__user_buf, _RET_IP_);
+      
+
       //For key scheduling purposes, the entropy pool acts as a kind of twist table.
       //The pool is circular, so our starting point can be the last element in the array. 
-      int entry_point = session % POOL_SIZE_BITS;
+      int entry_point = keyverse % POOL_SIZE_BITS;
       bitcpy(local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
       //make sure this IV is universally unique, and distinct from any global state.
-      (u64)local_iv[0] ^= session;
+      (u64)local_iv[0] ^= keyverse;
 
       //Sure get_alternate_rand() is optional, but anything helps.
       //If we add an additionall call to get_alternate_rand() we will;
@@ -222,7 +239,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       AesOfbOutput( &aesOfb, __user_buf, nbytes);
 
       //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
-      //Encrypt our entropy point with the key material derivied in this local session
+      //Encrypt our entropy point with the key material derivied in this local keyverse
       AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), BLOCK_SIZE);
       //Zero out memeory to prevent backtracking
       memzero_explicit(local_iv, sizeof(local_iv));
@@ -247,16 +264,16 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     size_t amountLeft = nbytes;
     int chunk;
     //Take everything about this specific call and merge it into one unique word (2 bytes).
-    //User input is combined with the entropy pool state to derive what key material is used for this session.
-    uint64_t session = get_session(__user_buf, _RET_IP_);
+    //User input is combined with the entropy pool state to derive what key material is used for this keyverse.
+    uint64_t keyverse = make_keyverse(__user_buf, _RET_IP_);
     //For key scheduling purposes, the entropy pool acts as a kind of twist table.
     //The pool is circular, so our starting point can be the last element in the array. 
-    int entry_point = session % POOL_SIZE_BITS;
+    int entry_point = keyverse % POOL_SIZE_BITS;
     bitcpy( local_iv, runtime_entropy, POOL_SIZE, entry_point, BLOCK_SIZE);
     
     //make sure this IV is universally unique, and distinct from any global state.
-    (b64)local_iv[0] ^= session;
-    //xor_bits(local_iv, session, 8);
+    (b64)local_iv[0] ^= keyverse;
+    //xor_bits(local_iv, keyverse, 8);
 
     //get_alternate_rand() optional, but anything helps here.
     //If we add an additionall call to get_alternate_rand() we will;
@@ -264,7 +281,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     (u64)local_iv[8] ^= get_alternate_rand();
 
     //Choose which plaintext input we want to use based off of a hard to guess offset 
-    //The iv tells us which input 'image' we chose to start the session:
+    //The iv tells us which input 'image' we chose to start the keyverse:
     int image_entry_point = (((int)*local_iv + entry_point) % POOL_SIZE_BITS);
     bitcpy( local_image, runtime_entropy, POOL_SIZE, image_entry_point, BLOCK_SIZE);
     //The key, IV and Image will tumble for as long as they need, and copy out PRNG to the user. 
@@ -302,7 +319,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
     }
     //Cover our tracks.
     //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
-    //Encrypt our entropy point with the key material derivied in this local session
+    //Encrypt our entropy point with the key material derivied in this local keyverse
     AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), chunk);
     memzero_explicit(local_image, sizeof(local_image));
     memzero_explicit(local_iv, sizeof(local_iv));
@@ -351,14 +368,14 @@ u64 get_random_u64(void)
   u64 anvil;
   u64 mop;
   u64 seed;
-  uint64_t session = get_session(&anvil, _RET_IP_);
-  int entry_point = session % POOL_SIZE_BITS;
+  uint64_t keyverse = make_keyverse(&anvil, _RET_IP_);
+  int entry_point = keyverse % POOL_SIZE_BITS;
   xor_bits( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
 
   // XOR over something globally unique.
   // anything in runtime_entropy could be in use.
-  // Some of the session isn't known to the caller.
-  anvil ^= session;
+  // Some of the keyverse isn't known to the caller.
+  anvil ^= keyverse;
 
   if (arch_get_random_seed_long(&seed)) {
     //Ok great, lets start with this value from hardware
@@ -382,10 +399,11 @@ u64 get_random_u64(void)
 
     //Get another point of PRNG to scrub the keypool.
     mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8));
-
-    //Make sure this mop is unique, more unique is more clean.
-    mop ^= session;
   }
+  //If the mop came from hardware, we want to scrub it before use.
+  //Make sure this mop is unique, more unique is more clean.
+  mop ^= keyverse;
+  keyverse = 0;
   //cover our tracks, remove entry point
   xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
   entry_point = 0;
@@ -404,25 +422,23 @@ u32 get_random_u32(void)
   u32 mop;
   long seed;
   int mop_entry_point;
-  //The caller doesn't know the value of session
-  uint64_t session = get_session(&anvil, _RET_IP_);
-  int entry_point = session % POOL_SIZE_BITS;
+  //The caller doesn't know the value of keyverse
+  uint64_t keyverse = make_keyverse(&anvil, _RET_IP_);
+  int entry_point = keyverse % POOL_SIZE_BITS;
   int key_entry_point = (int)*runtime_entropy + entry_point;
   xor_bits( &anvil, runtime_entropy, POOL_SIZE, key_entry_point, sizeof(anvil));
 
   // XOR over something globally unique.
   // anything in runtime_entropy could be in use.
-  // Some of the session isn't known to the caller.
-  anvil ^= (u32)session;
-  anvil ^= (u32)*(&session+4);
+  // Some of the keyverse isn't known to the caller.
+  anvil ^= (u32)keyverse;
 
   //Do we have a good source of hardware random values?
   if (arch_get_random_seed_long(&seed)) {
      //Only 32 bits needed
      xor_bits(&anvil, seed, 0, sizeof(anvil));
-     //The other 32 bits are used for cleanup. 
-     mop = (seed << 32);
-     //cleanup - remove entry pointer   
+     //The other 32 bits are used for cleanup.
+     mop = (seed << 32);  
   } else {
     // This jumptable pattern follows a similar pattern to the AES counterpart.
     int key_entry_point = (int)anvil % POOL_SIZE_BITS;
@@ -437,10 +453,11 @@ u32 get_random_u32(void)
 
     //Get another point of PRNG to scrub the keypool.
     mop = (u64)runtime_entropy + ((anvil + sizeof(anvil)) % (POOL_SIZE_BITS/8))
-
-    //Make sure this mop is unique, more unique is more clean.
-    mop ^= session;
   }
+  //If the mop came from hardware, we want to scrub it before use.
+  //Make sure this mop is unique, more unique is more clean.
+  mop ^= (u32)*(&keyverse+4);
+  keyverse = 0;
   //cover our tracks, remove entry point
   xor_bits( runtime_entropy + entry_point, mop, sizeof(anvil));
   entry_point = 0;
@@ -463,10 +480,10 @@ u32 get_random_u32(void)
 //If there is one function to make lockless, this is the one
 void add_interrupt_randomness(int irq, int irq_flags)
 {
-  //Globally unique session
-  uint64_t session = get_session(&irq, _RET_IP_);
+  //Globally unique keyverse
+  uint64_t keyverse = make_keyverse(&irq, _RET_IP_);
   //Other itterupts are unlikely to choose our same entry_point
-  int entry_point = session % (POOL_SIZE - 4);
+  int entry_point = keyverse % (POOL_SIZE - 4);
   uint8_t  *fast_pool = this_cpu_ptr(&irq_randomness);
   struct pt_regs    *regs = get_irq_regs();
   unsigned long   now = jiffies;
@@ -497,7 +514,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   
   //Seed is 64 bits, so lets squeeze ever bit out of that.
   (u64)fast_pool[0] ^= seed;
-  (u64)fast_pool[2] ^= session
+  (u64)fast_pool[2] ^= keyverse
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
@@ -570,6 +587,118 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   }
 }
 
+
+/*
+ * Credit (or debit) the entropy store with n bits of entropy.
+ * Use credit_entropy_bits_safe() if the value comes from userspace
+ * or otherwise should be checked for extreme values.
+ */
+static void credit_entropy_bits(struct entropy_store *r, int nbits)
+{
+  int entropy_count, orig, has_initialized = 0;
+  const int pool_size = r->poolinfo->poolfracbits;
+  int nfrac = nbits << ENTROPY_SHIFT;
+
+  if (!nbits)
+    return;
+
+retry:
+  entropy_count = orig = READ_ONCE(r->entropy_count);
+  if (nfrac < 0) {
+    /* Debit */
+    entropy_count += nfrac;
+  } else {
+    /*
+     * Credit: we have to account for the possibility of
+     * overwriting already present entropy.  Even in the
+     * ideal case of pure Shannon entropy, new contributions
+     * approach the full value asymptotically:
+     *
+     * entropy <- entropy + (pool_size - entropy) *
+     *  (1 - exp(-add_entropy/pool_size))
+     *
+     * For add_entropy <= pool_size/2 then
+     * (1 - exp(-add_entropy/pool_size)) >=
+     *    (add_entropy/pool_size)*0.7869...
+     * so we can approximate the exponential with
+     * 3/4*add_entropy/pool_size and still be on the
+     * safe side by adding at most pool_size/2 at a time.
+     *
+     * The use of pool_size-2 in the while statement is to
+     * prevent rounding artifacts from making the loop
+     * arbitrarily long; this limits the loop to log2(pool_size)*2
+     * turns no matter how large nbits is.
+     */
+    int pnfrac = nfrac;
+    const int s = r->poolinfo->poolbitshift + ENTROPY_SHIFT + 2;
+    /* The +2 corresponds to the /4 in the denominator */
+
+    do {
+      unsigned int anfrac = min(pnfrac, pool_size/2);
+      unsigned int add =
+        ((pool_size - entropy_count)*anfrac*3) >> s;
+
+      entropy_count += add;
+      pnfrac -= anfrac;
+    } while (unlikely(entropy_count < pool_size-2 && pnfrac));
+  }
+
+  if (unlikely(entropy_count < 0)) {
+    pr_warn("random: negative entropy/overflow: pool %s count %d\n",
+      r->name, entropy_count);
+    WARN_ON(1);
+    entropy_count = 0;
+  } else if (entropy_count > pool_size)
+    entropy_count = pool_size;
+  if ((r == &blocking_pool) && !r->initialized &&
+      (entropy_count >> ENTROPY_SHIFT) > 128)
+    has_initialized = 1;
+  if (cmpxchg(&r->entropy_count, orig, entropy_count) != orig)
+    goto retry;
+
+  if (has_initialized) {
+    r->initialized = 1;
+    wake_up_interruptible(&random_read_wait);
+    kill_fasync(&fasync, SIGIO, POLL_IN);
+  }
+
+  trace_credit_entropy_bits(r->name, nbits,
+          entropy_count >> ENTROPY_SHIFT, _RET_IP_);
+
+  if (r == &input_pool) {
+    int entropy_bits = entropy_count >> ENTROPY_SHIFT;
+    struct entropy_store *other = &blocking_pool;
+
+    if (crng_init < 2) {
+      if (entropy_bits < 128)
+        return;
+      crng_reseed(&primary_crng, r);
+      entropy_bits = r->entropy_count >> ENTROPY_SHIFT;
+    }
+
+    /* initialize the blocking pool if necessary */
+    if (entropy_bits >= random_read_wakeup_bits &&
+        !other->initialized) {
+      schedule_work(&other->push_work);
+      return;
+    }
+
+    /* should we wake readers? */
+    if (entropy_bits >= random_read_wakeup_bits &&
+        wq_has_sleeper(&random_read_wait)) {
+      wake_up_interruptible(&random_read_wait);
+      kill_fasync(&fasync, SIGIO, POLL_IN);
+    }
+    /* If the input pool is getting full, and the blocking
+     * pool has room, send some entropy to the blocking
+     * pool.
+     */
+    if (!work_pending(&other->push_work) &&
+        (ENTROPY_BITS(r) > 6 * r->poolinfo->poolbytes) &&
+        (ENTROPY_BITS(other) <= 6 * other->poolinfo->poolbytes))
+      schedule_work(&other->push_work);
+  }
+}
 // This only removes locking from the existing mix_pool_bytes() - we want a race conditions
 // The underlying mix_pool_bytes is awesome, but the locks around it are not needed with a keypool.
 // This one change removes locks from add_timer_randomness, add_input_randomness, add_disk_randomness, and add_interrupt_randomness
@@ -578,6 +707,12 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
          int nbytes)
 {
   _mix_pool_bytes(r, in, bytes);
+}
+
+static ssize_t
+_random_read(int nonblock, char __user *buf, size_t nbytes)
+{
+  return extract_crng_user(buf, nbytes);
 }
 
 // no blocking
