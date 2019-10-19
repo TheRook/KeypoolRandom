@@ -37,10 +37,10 @@
 //#include <trace/events/random.h>
 //#include </include/linux/lcm.h>
 
-
+#include <string.h>
 #include <stdlib.h>
-//#include <stdint.h>
-//#include <string.h>
+#include <stdint.h>
+#include <string.h>
 #include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
 #include <time.h>
 
@@ -87,7 +87,6 @@ static struct entropy_store input_pool = {
 
 
 #ifndef __frontdoor_key
-  //#ifdef CONFIG_X86_64
   #define __frontdoor_key( new_key, origin_address )(new_key = (u64)new_key ^ &origin_address ^ &new_key ^ _RET_IP_ ^ _THIS_IP_ )
   //#else
   // #define 
@@ -169,7 +168,7 @@ void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset
             break;
         }
       }
-      dest[k] ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
+      *(dest + k) ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
       if(k == byte_length-1)
       {
         //end the array with the bit position compliment
@@ -755,18 +754,30 @@ int
     )
 {
     uint8_t        local_block[BLOCK_SIZE*2];
-    
     //Assume this is the normal startup procedure from the kernel.
     load_file(runtime_entropy, POOL_SIZE);
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
     memset(local_block, 0, sizeof local_block); 
+ 
+    //u32 small = get_random_u32();
+    //u64 mid = get_random_u64();
+    //printf("%l",small);
+    //printf("\n\n");
+    //printf("%llu",mid);
+    //printf("\n\n");
     
     //lets fill a request
     extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
             printf("%1x", local_block[i]);
-     }
+    }
+    printf("\n\n");
+    extract_crng_user_unlimited(local_block, BLOCK_SIZE*2);
+    for (int i = 0; i < BLOCK_SIZE*2; i++)
+    {
+            printf("%1x", local_block[i]);
+    }
     return 0;
 }
