@@ -667,7 +667,15 @@ retry:
           entropy_count >> ENTROPY_SHIFT, _RET_IP_);
 
 }
-
+/*
+ * This is hard to do
+ * So, we will start with latent_entropy, although it isn't required it doesn't hurt.
+ * Then lets take addresses we know about - add them to the mix
+ * Fire up the debugger, and look for reigions of memory with good data. 
+ * The zero page has hardware identifieres that can be hard to guess. 
+ * Then derive a key the best we can given the degraded state of the pool.
+ * 
+ */
 static void find_more_entropy(void)
 {
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
@@ -676,9 +684,8 @@ static void find_more_entropy(void)
   AesOfbContext   aesOfb;
 
   uint64_t gate_key = make_gate_key(local_iv, _RET_IP_);
-  //For key scheduling purposes, the entropy pool acts as a kind of twist table.
-  //The pool is circular, so our starting point can be the last element in the array.
 
+  //Lets add as many easily accessable unknowns as we can:
   anvil[0] ^= (u64)&anvil;
   anvil[1] ^= (u64)_RET_IP_;
   anvil[2] ^= (u64)_THIS_IP_;
@@ -695,19 +702,21 @@ static void find_more_entropy(void)
   //Copy memory from the stack that hasn't been used
   xor_bits(anvil, anvil + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
 
+  //Lets make the best keys we can:
+  //Sticks when wound together can be load bearing: 
   int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
   int key_entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
-
-  //Sticks when wound together can be load bearing: 
-  xor_bits(local_iv, get_alternate_rand(), 4, 4, 4);
-  xor_bits(local_key, get_alternate_rand(), 4, 4, 4);
 
   //Reschedule the key so that it is more trustworthy cipher text:
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
   AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
   AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
 
-  //Use pure AES PRNG as the hammer for the anvil:
+  //Jump again - xoring the output each step.
+  int entry_point = _unique_key(local_iv, gate_key, key_entry_point, BLOCK_SIZE);
+  _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+
+  //Use pure PRNG as the hammer for the anvil:
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
   AesOfbOutput( &aesOfb, anvil, sizeof(anvil));
 
