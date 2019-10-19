@@ -437,9 +437,9 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
 // the user is willing to wait, so we'll do our very best.
 // when this method completes, the keypool as a whole is better off, as it will be re-scheduled.
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
-    //uint32_t    local_key[BLOCK_SIZE];
-    uint8_t    local_iv[BLOCK_SIZE];
-    uint8_t    local_image[BLOCK_SIZE];
+    uint8_t   local_key[BLOCK_SIZE];
+    uint8_t   local_iv[BLOCK_SIZE];
+    uint8_t   local_image[BLOCK_SIZE];
     AesOfbContext   aesOfb; 
     size_t amountLeft = nbytes;
     int chunk;
@@ -474,17 +474,20 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes){
         //Follow the twist, the iv we chose tells us which key to use
         //This routine needs the hardest to guess key in constant time.
         //we add the image_entry_point to avoid using the same (iv, key) combination - which still shouldn't happen.
-        key_entry_point = ((int)*local_iv + image_entry_point) % (POOL_SIZE - BLOCK_SIZE);
+        key_entry_point = ((int)*local_iv + image_entry_point);
+
         // For AES-OFB the final key is iv^key 
         // - so we wan't to make sure key_entry_point != entry_point
         //Fall to either side, don't prefer one side.
         if(key_entry_point == entry_point){
           key_entry_point += (key_entry_point % 2) ? 1 : -1;
         }
+
+        bitcpy( local_key, runtime_entropy, POOL_SIZE, key_entry_point, BLOCK_SIZE);
         //Use an outside source to make sure this key is unique.
         //This is one way we can show that this PRNG stream doesn't have a period
         //By including an outside source every block, we ensure an unlimited supply of PRNG.
-        (*(runtime_entropy + key_entry_point)) ^= get_alternate_rand();
+        (*local_key) ^= get_alternate_rand();
         //Generate one block of PRNG
         AesOfbInitialiseWithKey( &aesOfb, runtime_entropy + key_entry_point, (BLOCK_SIZE/8), local_iv );
         AesOfbOutput( &aesOfb, local_image, chunk);
@@ -766,7 +769,7 @@ int
     //printf("\n\n");
     //printf("%llu",mid);
     //printf("\n\n");
-    
+
     //lets fill a request
     extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
