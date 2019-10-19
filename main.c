@@ -668,7 +668,52 @@ retry:
 
 }
 
+static void find_more_entropy(void)
+{
+  uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
+  uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
+  uint8_t    anvil[POOL_SIZE] __latent_entropy;
+  AesOfbContext   aesOfb;
 
+  uint64_t gate_key = make_gate_key(local_iv, _RET_IP_);
+  //For key scheduling purposes, the entropy pool acts as a kind of twist table.
+  //The pool is circular, so our starting point can be the last element in the array.
+
+  anvil[0] ^= (u64)&anvil;
+  anvil[1] ^= (u64)_RET_IP_;
+  anvil[2] ^= (u64)_THIS_IP_;
+  anvil[3] ^= (u64)gate_key;
+  //Copy from the zero page:
+  xor_bits(anvil, 0, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //Copy recentally used instructions from the caller
+  xor_bits(anvil, _RET_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, _RET_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //Copy from the instructions around us:
+  xor_bits(anvil, _THIS_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, _THIS_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+
+  //Copy memory from the stack that hasn't been used
+  xor_bits(anvil, anvil + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+
+  int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  int key_entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+
+  //Sticks when wound together can be load bearing: 
+  xor_bits(local_iv, get_alternate_rand(), 4, 4, 4);
+  xor_bits(local_key, get_alternate_rand(), 4, 4, 4);
+
+  //Reschedule the key so that it is more trustworthy cipher text:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
+  AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
+
+  //Use pure AES PRNG as the hammer for the anvil:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  AesOfbOutput( &aesOfb, anvil, sizeof(anvil));
+
+  //add 1/2 credit: 
+  credit_entropy_bits(anvil, 1024*4);
+}
 
 static ssize_t
 _random_read(int nonblock, char __user *buf, size_t nbytes)
