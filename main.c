@@ -676,7 +676,7 @@ retry:
  * Then derive a key the best we can given the degraded state of the pool.
  * 
  */
-static void find_more_entropy(void)
+static void find_more_entropy(int need_credit)
 {
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
@@ -698,12 +698,12 @@ static void find_more_entropy(void)
   //Copy from the instructions around us:
   xor_bits(anvil, _THIS_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
   xor_bits(anvil, _THIS_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
-
-  //Copy memory from the stack that hasn't been used
+  //Copy memory from the stack that was used before us:
   xor_bits(anvil, anvil + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //Copy memory from the stack that hasn't been used
+  xor_bits(anvil, anvil - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
 
   //Lets make the best keys we can:
-  //Sticks when wound together can be load bearing: 
   int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
   int key_entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
 
@@ -712,6 +712,7 @@ static void find_more_entropy(void)
   AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
   AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
 
+  //Sticks when wound together can be load bearing
   //Jump again - xoring the output each step.
   int entry_point = _unique_key(local_iv, gate_key, key_entry_point, BLOCK_SIZE);
   _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
@@ -720,8 +721,13 @@ static void find_more_entropy(void)
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
   AesOfbOutput( &aesOfb, anvil, sizeof(anvil));
 
-  //add 1/2 credit: 
-  credit_entropy_bits(anvil, 1024*4);
+  int credit = 0;
+  if(need_credit){
+    //1/2 credit, count is in bits, not bytes.
+    //POOL_SIZE is bytes.
+    credit = (POOL_SIZE)*4
+  }
+  credit_entropy_bits(anvil, credit);
 }
 
 static ssize_t
