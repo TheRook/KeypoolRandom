@@ -669,12 +669,16 @@ retry:
 }
 
 /*
- * This is hard to do
+ * Getting entropy on a fresh system is a hard thing to do. 
  * So, we will start with latent_entropy, although it isn't required it doesn't hurt.
  * Then lets take addresses we know about - add them to the mix
  * Fire up the debugger, and look for reigions of memory with good data. 
  * The zero page has hardware identifieres that can be hard to guess. 
  * Then derive a key the best we can given the degraded state of the pool.
+ * 
+ * find_more_entropy_in_memory() is called when extract_crng_user can't be used.
+ * get_random_u32() and get_random_u64() can't be used.
+ *
  */
 static void find_more_entropy_in_memory(int nbytes_needed)
 {
@@ -687,7 +691,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   int        jump_point = 0;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
-  //Lets generate the best key material we can.
+  //twigs when wrapped together can become loadbearing
   //_unique_key() is not safe at this point - but it is unique enough as a seed.
   //We will use it as a jump table, to get chunks.
   //Lets allocate a chunk of memory from the heap
@@ -701,12 +705,12 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
   jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
   //Reschedule the key so that it is more trustworthy cipher text:
-  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
-  //twigs when wrapped together can become loadbearing
+  AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  //Make the plaintext input used in key derivation distinct:
   jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
   jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
-  AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
-  AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
+  AesOfbOutput(&aesOfb, local_iv, sizeof(local_iv));
+  AesOfbOutput(&aesOfb, local_key, sizeof(local_key));
   //A block cipher is used as a KDF when we have low-entropy
   //The keys will be pure PRNG from a trusted block cipher like AES:
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
@@ -759,6 +763,15 @@ static void find_more_entropy_in_memory(int nbytes_needed)
 
   //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
   fast_keypool_addition(anvil, nbytes_needed);
+  //Things are pretty good.
+  //The driver is warm, _unique_key() is reasonable.
+  //Lets take the keypool for a spin:
+  extract_crng_user_unlimited(anvil, nbytes_needed);
+
+  //Add this source:
+  fast_keypool_addition(anvil, nbytes_needed);
+
+  //gtg
   free(anvil);
 }
 
