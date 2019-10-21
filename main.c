@@ -389,6 +389,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       return nbytes;
     }
 }
+
 // This is the /dev/urandom variant.
 // it is simlar to the algorithm above, but more time is spent procuring stronger key mateiral.
 // the user is willing to wait, so we'll do our very best.
@@ -665,8 +666,8 @@ retry:
 
   trace_credit_entropy_bits(r->name, nbits,
           entropy_count >> ENTROPY_SHIFT, _RET_IP_);
-
 }
+
 /*
  * This is hard to do
  * So, we will start with latent_entropy, although it isn't required it doesn't hurt.
@@ -676,58 +677,88 @@ retry:
  * Then derive a key the best we can given the degraded state of the pool.
  * 
  */
-static void find_more_entropy(int need_credit)
+static void find_more_entropy_in_memory(int nbytes_needed)
 {
+  AesOfbContext   aesOfb;
+  //Even if the entropy pool is all zeros - 
+  //latent_entropy will give us somthing, which is the point of the plugin.
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
-  uint8_t    anvil[POOL_SIZE] __latent_entropy;
-  AesOfbContext   aesOfb;
+  uint8_t    *anvil;
+  int        entry_point = 0;
+  u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
-  uint64_t gate_key = make_gate_key(local_iv, _RET_IP_);
-
-  //Lets add as many easily accessable unknowns as we can:
-  anvil[0] ^= (u64)&anvil;
-  anvil[1] ^= (u64)_RET_IP_;
-  anvil[2] ^= (u64)_THIS_IP_;
-  anvil[3] ^= (u64)gate_key;
-  //Copy from the zero page:
-  xor_bits(anvil, 0, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //Lets generate the best key material we can.
+  //_unique_key() is not safe at this point - but it is unique enough as a seed.
+  //We will use it as a jump table, to get chunks.
+  //Lets allocate a chunk of memory from the heap
+  //we are not setting the memory any noise here is gold
+  anvil = (uint8_t *)malloc(nbytes_needed);
+  for(int block_index=0; block_index < nbytes_needed; block_index+=BLOCK_SIZE){
+    //Chunk it in one at a time - which will cause writes to the table.
+    entry_point = _unique_key(anvil + block_index, gate_key, entry_point, BLOCK_SIZE);
+  }
+  //_unique_key will do its job - the IV and Key will be globally unique
+  entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+  //twigs when wrapped together can become loadbearing
+  entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+  //Reschedule the key so that it is more trustworthy cipher text:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
+  AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
+  //A block cipher is used as a KDF when we have low-entropy
+  //The keys will be pure PRNG from a trusted block cipher like AES:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  
+  //Gather Compile time entropy
+  //  - GCC's latent_entropy on anvil, local_key and local_iv
+  //  - machine code of this method (EIP), and anything near by.
+  //  - machine code of whoever called us, and anything near by.
   //Copy recentally used instructions from the caller
   xor_bits(anvil, _RET_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
   xor_bits(anvil, _RET_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
   //Copy from the instructions around us:
   xor_bits(anvil, _THIS_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
   xor_bits(anvil, _THIS_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
-  //Copy memory from the stack that was used before us:
+
+  //Gather Runtime Entropy
+  //  - Data from the zero page
+  //  - Memory addresses from the stack and heap
+  //  - Unset memory on the heap that may contain noise
+  //  - Unallocated memory that maybe have used or in use
+  //Copy from the zero page, contains HW IDs from the bios
+  xor_bits(anvil, 0, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+
+  //Lets add as many easily accessable unknowns as we can:
+  //Even without ASLR some addresses can be more difficult to guess than others.
+  //With ASLR, this would be paritally feedback noise, with offsets.
+  //Add any addresses that are unknown under POOL_SIZE
+  //16 addresses for 64-bit is ideal, 32 should use 32 addresses to make 1024 bits.
+  //Todo: use a debugger to find the 32 hardest to guess addresses.
+  anvil[0] ^= (u64)&anvil;
+  anvil[1] ^= (u64)_RET_IP_;
+  anvil[2] ^= (u64)_THIS_IP_;
+  anvil[3] ^= (u64)&gate_key;
+  anvil[5] ^= (u64)entry_point;
+  anvil[6] ^= (u64)&entry_point;
+
+  //XOR untouched memory from the heap - any noise here is golden.
+  xor_bits(anvil, local_iv, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //XOR memory from the heap that we haven't allocated
+  //is there a part of the bss that would be good to copy from?
+  xor_bits(anvil, local_iv - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, local_iv + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  //Copy memory from the stack that was used before our execution
   xor_bits(anvil, anvil + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
   //Copy memory from the stack that hasn't been used
   xor_bits(anvil, anvil - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
 
-  //Lets make the best keys we can:
-  int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
-  int key_entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
-
-  //Reschedule the key so that it is more trustworthy cipher text:
-  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
-  AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
-  AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
-
-  //Sticks when wound together can be load bearing
-  //Jump again - xoring the output each step.
-  int entry_point = _unique_key(local_iv, gate_key, key_entry_point, BLOCK_SIZE);
-  _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
-
-  //Use pure PRNG as the hammer for the anvil:
-  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  //Use this new block-cipher PRNG as the hammer for the anvil
   AesOfbOutput( &aesOfb, anvil, sizeof(anvil));
 
-  int credit = 0;
-  if(need_credit){
-    //1/2 credit, count is in bits, not bytes.
-    //POOL_SIZE is bytes.
-    credit = (POOL_SIZE)*4
-  }
-  credit_entropy_bits(anvil, credit);
+  free(anvil);
 }
 
 static ssize_t
@@ -753,8 +784,6 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
   //We will respect the users wishes, and spend time to produce the best output.
   return extract_crng_user_unlimited(buf, nbytes);
 }
-
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  main
