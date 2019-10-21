@@ -535,40 +535,32 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   AesOfbContext   aesOfb; 
   unsigned long flags;
   int crng_init;
-  int   i, num;
-  uint8_t local_iv[BLOCK_SIZE];
+  int   i, num, jump_point = 0;
+  u64 gate_key; 
+  uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
+  uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
   union {
     __u8  block[BLOCK_SIZE];
     __u32 key[8];
   } buf;
 
+  //Get entry to the key pool
+  gate_key = make_gate_key(crng, _RET_IP_);
   // fetch an IV in the current state.
-  extract_crng_user(&local_iv, BLOCK_SIZE);
+  jump_point = _unique_key(&local_iv, gate_key, jump_point, BLOCK_SIZE);
+  _unique_key(&local_key, gate_key, jump_point, BLOCK_SIZE);
 
-  //Generate a secure key:
-  if (r) {
-    num = extract_crng_user(&buf, BLOCK_SIZE);
-    if (num == 0)
-      return;
-  } else {
-    _extract_crng(&primary_crng, buf.block);
-  }
-  for (i = 0; i < 8; i++) {
-    u64 rv;
-    rv ^= get_alternate_rand();
-    crng->state[i+4] ^= buf.key[i] ^ rv;
-  }
-
-  //We used some unclean hardware input, lets mix the pool
-  mix_pool_bytes(crng, runtime_entropy, POOL_SIZE);
-
+  //Output of extract_crng_user() will XOR with the current crng->state
+  extract_crng_user(crng->state, sizeof(crng->state));
   //encrypt the entire entropy pool with the new key:
-  AesOfbInitialiseWithKey( &aesOfb, crng->state, (BLOCK_SIZE/8), local_iv );
+  AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv);
   //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-  AesOfbOutput( &aesOfb, runtime_entropy, POOL_SIZE); 
+  AesOfbOutput(&aesOfb, crng->state, POOL_SIZE); 
 
   memzero_explicit(&buf, sizeof(buf));
   crng->init_time = jiffies;
+
+
   if (crng == &primary_crng && crng_init < 2) {
     /*invalidate_batched_entropy();
     numa_crng_init();
@@ -798,6 +790,7 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
   //The user is expecting to get the best restuls.
   //Watch out, unlimited is coming through - lets tidy the place up. 
+  //todo - wrong inputs?
   crng_reseed(file, runtime_entropy);
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
