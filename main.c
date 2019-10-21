@@ -43,6 +43,8 @@
 #define BLOCK_SIZE_BITS         BLOCK_SIZE * 8
 #define POOL_SIZE               BLOCK_SIZE * 4
 #define POOL_SIZE_BITS          BLOCK_SIZE * 8
+
+#define ZERO_PAGE               0
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  FUNCTIONS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -701,19 +703,6 @@ static void find_more_entropy_in_memory(int nbytes_needed)
     //Chunk it in one at a time - which will cause writes to the table.
     jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
   }
-  //_unique_key will do its job - the IV and Key will be globally unique
-  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
-  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
-  //Reschedule the key so that it is more trustworthy cipher text:
-  AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
-  //Make the plaintext input used in key derivation distinct:
-  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
-  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
-  AesOfbOutput(&aesOfb, local_iv, sizeof(local_iv));
-  AesOfbOutput(&aesOfb, local_key, sizeof(local_key));
-  //A block cipher is used as a KDF when we have low-entropy
-  //The keys will be pure PRNG from a trusted block cipher like AES:
-  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
   
   //Gather Compile time entropy
   //  - GCC's latent_entropy on anvil, local_key and local_iv
@@ -732,7 +721,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //  - Unset memory on the heap that may contain noise
   //  - Unallocated memory that maybe have used or in use
   //Copy from the zero page, contains HW IDs from the bios
-  xor_bits(anvil, 0, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, ZERO_PAGE, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets add as many easily accessable unknowns as we can:
   //Even without ASLR some addresses can be more difficult to guess than others.
@@ -758,18 +747,34 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //Copy memory from the stack that hasn't been used
   xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
+  //Lets what we have now to build stronger keys
+  fast_keypool_addition(anvil, gate_key + jump_point, nbytes_needed);
+  //_unique_key will do its job - the IV and Key will be globally unique
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
+  //Reschedule the key so that it is more trustworthy cipher text:
+  AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  //Make the plaintext input used in key derivation distinct:
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
+  AesOfbOutput(&aesOfb, local_iv, sizeof(local_iv));
+  AesOfbOutput(&aesOfb, local_key, sizeof(local_key));
+  //A block cipher is used as a KDF when we have low-entropy
+  //The keys will be pure PRNG from a trusted block cipher like AES:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+
   //Use this new block-cipher PRNG as the hammer for the anvil
   AesOfbOutput(&aesOfb, anvil, nbytes_needed);
 
   //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
-  fast_keypool_addition(anvil, nbytes_needed);
+  fast_keypool_addition(anvil, gate_key + jump_point, nbytes_needed);
   //Things are pretty good.
   //The driver is warm, _unique_key() is reasonable.
   //Lets take the keypool for a spin:
   extract_crng_user_unlimited(anvil, nbytes_needed);
 
   //Add this source:
-  fast_keypool_addition(anvil, nbytes_needed);
+  fast_keypool_addition(anvil, gate_key, nbytes_needed);
 
   //gtg
   free(anvil);
