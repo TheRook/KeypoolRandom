@@ -675,7 +675,6 @@ retry:
  * Fire up the debugger, and look for reigions of memory with good data. 
  * The zero page has hardware identifieres that can be hard to guess. 
  * Then derive a key the best we can given the degraded state of the pool.
- * 
  */
 static void find_more_entropy_in_memory(int nbytes_needed)
 {
@@ -685,7 +684,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
   uint8_t    *anvil;
-  int        entry_point = 0;
+  int        jump_point = 0;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
   //Lets generate the best key material we can.
@@ -696,16 +695,16 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   anvil = (uint8_t *)malloc(nbytes_needed);
   for(int block_index=0; block_index < nbytes_needed; block_index+=BLOCK_SIZE){
     //Chunk it in one at a time - which will cause writes to the table.
-    entry_point = _unique_key(anvil + block_index, gate_key, entry_point, BLOCK_SIZE);
+    jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
   }
   //_unique_key will do its job - the IV and Key will be globally unique
-  entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
-  entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
-  //twigs when wrapped together can become loadbearing
-  entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
-  entry_point = _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
   //Reschedule the key so that it is more trustworthy cipher text:
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  //twigs when wrapped together can become loadbearing
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
   AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
   AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
   //A block cipher is used as a KDF when we have low-entropy
@@ -717,11 +716,11 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //  - machine code of this method (EIP), and anything near by.
   //  - machine code of whoever called us, and anything near by.
   //Copy recentally used instructions from the caller
-  xor_bits(anvil, _RET_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
-  xor_bits(anvil, _RET_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, _RET_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, _RET_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy from the instructions around us:
-  xor_bits(anvil, _THIS_IP_, sizeof(anvil), sizeof(anvil), sizeof(anvil));
-  xor_bits(anvil, _THIS_IP_ - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, _THIS_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, _THIS_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Gather Runtime Entropy
   //  - Data from the zero page
@@ -729,7 +728,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //  - Unset memory on the heap that may contain noise
   //  - Unallocated memory that maybe have used or in use
   //Copy from the zero page, contains HW IDs from the bios
-  xor_bits(anvil, 0, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, 0, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets add as many easily accessable unknowns as we can:
   //Even without ASLR some addresses can be more difficult to guess than others.
@@ -741,23 +740,25 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   anvil[1] ^= (u64)_RET_IP_;
   anvil[2] ^= (u64)_THIS_IP_;
   anvil[3] ^= (u64)&gate_key;
-  anvil[5] ^= (u64)entry_point;
-  anvil[6] ^= (u64)&entry_point;
+  anvil[5] ^= (u64)jump_point;
+  anvil[6] ^= (u64)&jump_point;
 
   //XOR untouched memory from the heap - any noise here is golden.
-  xor_bits(anvil, local_iv, sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, local_iv, nbytes_needed, nbytes_needed, nbytes_needed);
   //XOR memory from the heap that we haven't allocated
   //is there a part of the bss that would be good to copy from?
-  xor_bits(anvil, local_iv - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
-  xor_bits(anvil, local_iv + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that was used before our execution
-  xor_bits(anvil, anvil + sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that hasn't been used
-  xor_bits(anvil, anvil - sizeof(anvil), sizeof(anvil), sizeof(anvil), sizeof(anvil));
+  xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Use this new block-cipher PRNG as the hammer for the anvil
-  AesOfbOutput( &aesOfb, anvil, sizeof(anvil));
+  AesOfbOutput(&aesOfb, anvil, nbytes_needed);
 
+  //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
+  fast_keypool_addition(anvil, nbytes_needed);
   free(anvil);
 }
 
