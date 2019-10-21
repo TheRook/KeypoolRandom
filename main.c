@@ -155,35 +155,6 @@ void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset
   }
 }
 
-//Copy by bit offset.
-void  bitcpy( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, int byte_length)
-{
-  int start_byte = bit_offset/32;        //The start byte to start the copy
-  int pos = bit_offset%32;      //The start bit within the first byte
-  for(int k = 0; k < byte_length; k++)
-  {
-      //Treat the source as a circular buffer.          
-      if(start_byte + k > source_len)
-      {
-         start_byte = 0;
-        if(k > source_len)
-        {
-            //Should not happen.
-            break;
-        }
-      }
-      dest[k] = (0xffffffff >> (32-(pos))) << source[start_byte+k];
-      if(k == byte_length-1)
-      {
-        //end the array with the bit position compliment
-        pos = 32 - (bit_offset%32);
-      }else{
-              pos = 0;
-      }
-  }
-}
-
-
 // This only removes locking from the existing mix_pool_bytes() - we want a race conditions
 // The underlying mix_pool_bytes is awesome, but the locks around it are not needed with a keypool.
 // This one change removes locks from add_timer_randomness, add_input_randomness, add_disk_randomness, and add_interrupt_randomness
@@ -202,8 +173,8 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
 
 u64 get_random_u64(void)
 {
-  u64 anvil;
-  u64 mop;
+  u64 anvil __latent_entropy;
+  u64 mop __latent_entropy;
   u64 seed;
   int key_entry_point;
   uint64_t gate_key = make_gate_key(&anvil, _RET_IP_);
@@ -219,9 +190,9 @@ u64 get_random_u64(void)
     //Ok great, lets start with this value from hardware
     //We don't know if it is good or bad, but it helps.
     anvil ^= seed;
-
     //cleanup - remove entry point:
-    arch_get_random_seed_long(&mop);
+    arch_get_random_seed_long(&seed);
+    mop ^= seed;
   } else {
 
     // This jumptable pattern follows a similar pattern to the AES counterpart.
@@ -249,8 +220,8 @@ u64 get_random_u64(void)
  */
 u32 get_random_u32(void)
 {
-  u32 anvil;
-  u32 mop;
+  u32 anvil __latent_entropy;
+  u32 mop __latent_entropy;
   long seed;
   int key_entry_point;
   int mop_entry_point;
@@ -292,7 +263,7 @@ u32 get_random_u32(void)
  */
 u64 get_alternate_rand()
 {
-  u64 a_few_words;
+  u64 a_few_words __latent_entropy;
   //Try every source we know of. Taken from random.c
   if(!arch_get_random_seed_long(&a_few_words))
   {
@@ -373,19 +344,20 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //If we can be fast, lets be fast.
     }else if(nbytes <= 4){
       //Dogfood - get one byte from the pool.
-      u32 one_chunk;
+      u32 one_chunk __latent_entropy;
       one_chunk ^= get_random_u32();
       memcpy(__user_buf, &one_chunk, nbytes);
       return nbytes;
     }else if(nbytes <= 8){
       //Grab a larger chunk
-      u64 two_chunk = get_random_u64();
+      u64 two_chunk __latent_entropy;
+      two_chunk ^= get_random_u64();
       memcpy(__user_buf, &two_chunk, nbytes);
       return nbytes;
     }else{
       //Ok, we need somthing bigger, time for OFB.
-      uint8_t    local_iv[BLOCK_SIZE];
-      uint8_t    local_key[BLOCK_SIZE];
+      uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
+      uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
       AesOfbContext   aesOfb; 
       size_t amountLeft = nbytes;
       int chunk;
@@ -417,15 +389,16 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       return nbytes;
     }
 }
+
 // This is the /dev/urandom variant.
 // it is simlar to the algorithm above, but more time is spent procuring stronger key mateiral.
 // the user is willing to wait, so we'll do our very best.
 // when this method completes, the keypool as a whole is better off, as it will be re-scheduled.
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
-    uint8_t   local_key[BLOCK_SIZE];
-    uint8_t   local_iv[BLOCK_SIZE];
-    uint8_t   local_image[BLOCK_SIZE];
+    uint8_t   local_key[BLOCK_SIZE] __latent_entropy;
+    uint8_t   local_iv[BLOCK_SIZE] __latent_entropy;
+    uint8_t   local_image[BLOCK_SIZE] __latent_entropy;
     AesOfbContext   aesOfb;
     size_t amountLeft = nbytes;
     int chunk;
@@ -487,6 +460,16 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     return nbytes;
 }
 
+/*
+ * Credit (or debit) the entropy store with n bits of entropy.
+ * Use credit_entropy_bits_safe() if the value comes from userspace
+ * or otherwise should be checked for extreme values.
+ */
+static void fast_keypool_addition(void *small_pool, long gate_key, int nbytes)
+{
+  int entry_point = gate_key % POOL_SIZE_BITS;
+  xor_bits(runtime_entropy, small_pool, entry_point, POOL_SIZE, nbytes);
+}
 
 /* This function is in fact called more times than I have ever used a phone.
  * lets keep this funciton as light as possilbe, and move more weight to extract_crng_user()
@@ -511,7 +494,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   cycles_t    cycles = irq_flags;
   __u32     c_high, j_high;
   __u64     ip = _RET_IP_;
-  unsigned long   seed;
+  unsigned long   seed ;
 
   //Taken from random.c - all O(1) operations
   //The interrupt + time gives us 4 bytes.
@@ -534,25 +517,16 @@ void add_interrupt_randomness(int irq, int irq_flags)
   
   //Seed is 64 bits, so lets squeeze ever bit out of that.
   fast_pool[0] ^= seed;
+  fast_pool[1] ^= seed >> 32;
   fast_pool[2] ^= gate_key;
+  fast_pool[3] ^= gate_key >> 32;
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  runtime_entropy[entry_point] ^= fast_pool[0];
-  runtime_entropy[entry_point+2] ^= fast_pool[2];
+  fast_keypool_addition(fast_pool, gate_key, 4);
 }
 
 
-/*
- * Credit (or debit) the entropy store with n bits of entropy.
- * Use credit_entropy_bits_safe() if the value comes from userspace
- * or otherwise should be checked for extreme values.
- */
-static void fast_keypool_addition(struct entropy_store *r, int nbits, long gate_key)
-{
-  int entry_point = gate_key % POOL_SIZE_BITS;
-  xor_bits(runtime_entropy,r->pool, entry_point, POOL_SIZE, nbits);
-}
 
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 {
@@ -692,10 +666,101 @@ retry:
 
   trace_credit_entropy_bits(r->name, nbits,
           entropy_count >> ENTROPY_SHIFT, _RET_IP_);
-
 }
 
+/*
+ * This is hard to do
+ * So, we will start with latent_entropy, although it isn't required it doesn't hurt.
+ * Then lets take addresses we know about - add them to the mix
+ * Fire up the debugger, and look for reigions of memory with good data. 
+ * The zero page has hardware identifieres that can be hard to guess. 
+ * Then derive a key the best we can given the degraded state of the pool.
+ */
+static void find_more_entropy_in_memory(int nbytes_needed)
+{
+  AesOfbContext   aesOfb;
+  //Even if the entropy pool is all zeros - 
+  //latent_entropy will give us somthing, which is the point of the plugin.
+  uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
+  uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
+  uint8_t    *anvil;
+  int        jump_point = 0;
+  u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
+  //Lets generate the best key material we can.
+  //_unique_key() is not safe at this point - but it is unique enough as a seed.
+  //We will use it as a jump table, to get chunks.
+  //Lets allocate a chunk of memory from the heap
+  //we are not setting the memory any noise here is gold
+  anvil = (uint8_t *)malloc(nbytes_needed);
+  for(int block_index=0; block_index < nbytes_needed; block_index+=BLOCK_SIZE){
+    //Chunk it in one at a time - which will cause writes to the table.
+    jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
+  }
+  //_unique_key will do its job - the IV and Key will be globally unique
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
+  //Reschedule the key so that it is more trustworthy cipher text:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  //twigs when wrapped together can become loadbearing
+  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
+  AesOfbOutput( &aesOfb, local_iv, sizeof(local_iv));
+  AesOfbOutput( &aesOfb, local_key, sizeof(local_key));
+  //A block cipher is used as a KDF when we have low-entropy
+  //The keys will be pure PRNG from a trusted block cipher like AES:
+  AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+  
+  //Gather Compile time entropy
+  //  - GCC's latent_entropy on anvil, local_key and local_iv
+  //  - machine code of this method (EIP), and anything near by.
+  //  - machine code of whoever called us, and anything near by.
+  //Copy recentally used instructions from the caller
+  xor_bits(anvil, _RET_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, _RET_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  //Copy from the instructions around us:
+  xor_bits(anvil, _THIS_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, _THIS_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+
+  //Gather Runtime Entropy
+  //  - Data from the zero page
+  //  - Memory addresses from the stack and heap
+  //  - Unset memory on the heap that may contain noise
+  //  - Unallocated memory that maybe have used or in use
+  //Copy from the zero page, contains HW IDs from the bios
+  xor_bits(anvil, 0, nbytes_needed, nbytes_needed, nbytes_needed);
+
+  //Lets add as many easily accessable unknowns as we can:
+  //Even without ASLR some addresses can be more difficult to guess than others.
+  //With ASLR, this would be paritally feedback noise, with offsets.
+  //Add any addresses that are unknown under POOL_SIZE
+  //16 addresses for 64-bit is ideal, 32 should use 32 addresses to make 1024 bits.
+  //Todo: use a debugger to find the 32 hardest to guess addresses.
+  anvil[0] ^= (u64)&anvil;
+  anvil[1] ^= (u64)_RET_IP_;
+  anvil[2] ^= (u64)_THIS_IP_;
+  anvil[3] ^= (u64)&gate_key;
+  anvil[5] ^= (u64)jump_point;
+  anvil[6] ^= (u64)&jump_point;
+
+  //XOR untouched memory from the heap - any noise here is golden.
+  xor_bits(anvil, local_iv, nbytes_needed, nbytes_needed, nbytes_needed);
+  //XOR memory from the heap that we haven't allocated
+  //is there a part of the bss that would be good to copy from?
+  xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  //Copy memory from the stack that was used before our execution
+  xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  //Copy memory from the stack that hasn't been used
+  xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+
+  //Use this new block-cipher PRNG as the hammer for the anvil
+  AesOfbOutput(&aesOfb, anvil, nbytes_needed);
+
+  //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
+  fast_keypool_addition(anvil, nbytes_needed);
+  free(anvil);
+}
 
 static ssize_t
 _random_read(int nonblock, char __user *buf, size_t nbytes)
@@ -720,8 +785,6 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
   //We will respect the users wishes, and spend time to produce the best output.
   return extract_crng_user_unlimited(buf, nbytes);
 }
-
-
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  main
