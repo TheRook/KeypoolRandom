@@ -265,7 +265,7 @@ u32 get_random_u32(void)
  */
 u64 get_alternate_rand()
 {
-  u64 a_few_words __latent_entropy;
+  u64 a_few_words = 0;
   //Try every source we know of. Taken from random.c
   if(!arch_get_random_seed_long(&a_few_words))
   {
@@ -274,10 +274,38 @@ u64 get_alternate_rand()
          a_few_words ^= random_get_entropy();
       }
   }
+  //Well we know one source that won't let us down.
   if(!a_few_words)
   {
-    //Well we know one source that won't let us down:
-    a_few_words ^= get_random_u64();
+    u64 anvil __latent_entropy;
+    u64 mop   __latent_entropy;
+    make_gate_key(&anvil, _RET_IP_);
+
+    //The caller is likely stacking PRNG, we can help.
+    //Lets use the keypool with a jump table -
+    //this jumptable pattern follows a similar pattern to the AES counterpart.
+    int start_point = (int)anvil % POOL_SIZE_BITS;
+    int key_point = (int)runtime_entropy[start_point] % POOL_SIZE_BITS;
+    //If we choose the same point then we xor the same values.
+    //Fall to either side, don't prefer one side.
+    if(start_point == key_point){
+      //flip a coin
+      key_point += (key_point % 2) ? 4 : -4;
+    }
+    //add this source
+    xor_bits(&anvil, runtime_entropy, sizeof(runtime_entropy), start_point, sizeof(anvil));
+    xor_bits(&anvil, runtime_entropy, sizeof(runtime_entropy), key_point, sizeof(anvil));
+
+
+    int mop_point = (int)runtime_entropy[key_point] % (POOL_SIZE_BITS/8);
+    //Get another point of PRNG to scrub the keypool.
+    mop ^= (u64)*(runtime_entropy + mop_point);
+
+    xor_bits(runtime_entropy, mop, sizeof(mop), start_point, sizeof(mop));
+    start_point = 0;
+    key_point = 0;
+    a_few_words = anvil;
+    anvil = 0;
   }
   return a_few_words;
 }
@@ -293,7 +321,7 @@ no two threads can ever have the same gate_key - so the result is unique.
 */
 int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
 {
-  //Jump table, use hte last point as the next point.
+  //Jump table, use the last point as the next point.
   int entry_point = (int)runtime_entropy[last_jump] % POOL_SIZE_BITS;
   //There is a 1/POOL_SIZE_BITS chance well jump to the same spot
   if(entry_point == last_jump)
@@ -338,58 +366,38 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
  * device driver (i.e. reading /dev/random)
  */
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
-    //Check  to see if the request is too small to warrent generating a full block.
-    //Speed is an important part of this driver
-    //get_random_u32 and get_random_u64 where written to be secure
-    if(nbytes <= 0){
-      return 0;
-    //If we can be fast, lets be fast.
-    }else if(nbytes <= 4){
-      //Dogfood - get one byte from the pool.
-      u32 one_chunk __latent_entropy;
-      one_chunk ^= get_random_u32();
-      memcpy(__user_buf, &one_chunk, nbytes);
-      return nbytes;
-    }else if(nbytes <= 8){
-      //Grab a larger chunk
-      u64 two_chunk __latent_entropy;
-      two_chunk ^= get_random_u64();
-      memcpy(__user_buf, &two_chunk, nbytes);
-      return nbytes;
-    }else{
-      //Ok, we need somthing bigger, time for OFB.
-      uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
-      uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
-      AesOfbContext   aesOfb; 
-      size_t amountLeft = nbytes;
-      int chunk;
-      //Take everything about this specific call and merge it into one unique word (2 bytes).
-      //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
-      uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
-      
-      //For key scheduling purposes, the entropy pool acts as a kind of twist table.
-      //The pool is circular, so our starting point can be the last element in the array. 
-      int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+    //Ok, we need somthing bigger, time for OFB.
+    uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
+    uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
+    AesOfbContext   aesOfb; 
+    size_t amountLeft = nbytes;
+    int chunk;
+    //Take everything about this specific call and merge it into one unique word (2 bytes).
+    //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
+    uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
+    
+    //For key scheduling purposes, the entropy pool acts as a kind of twist table.
+    //The pool is circular, so our starting point can be the last element in the array. 
+    int entry_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
 
-      //Select the key:
-      _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
+    //Select the key:
+    _unique_key(local_key, gate_key, entry_point, BLOCK_SIZE);
 
-      //Generate one block of PRNG
-      AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
-      
-      //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-      AesOfbOutput( &aesOfb, __user_buf, nbytes);
+    //Generate one block of PRNG
+    AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+    
+    //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
+    AesOfbOutput( &aesOfb, __user_buf, nbytes);
 
-      //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
-      //Encrypt our entropy point with the key material derivied in this local gate_key
-      AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), BLOCK_SIZE);
-      //Zero out memeory to prevent backtracking
-      memzero_explicit(local_iv, sizeof(local_iv));
-      entry_point = 0;
-      //Cleanup complete 
-      //at this point it should not be possilbe to re-create any part of the PRNG stream used.
-      return nbytes;
-    }
+    //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
+    //Encrypt our entropy point with the key material derivied in this local gate_key
+    AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), BLOCK_SIZE);
+    //Zero out memeory to prevent backtracking
+    memzero_explicit(local_iv, sizeof(local_iv));
+    entry_point = 0;
+    //Cleanup complete 
+    //at this point it should not be possilbe to re-create any part of the PRNG stream used.
+    return nbytes;
 }
 
 // This is the /dev/urandom variant.
@@ -558,8 +566,11 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   AesOfbOutput(&aesOfb, crng->state, POOL_SIZE); 
 
   memzero_explicit(&buf, sizeof(buf));
+  memzero_explicit(&local_iv, sizeof(local_iv));
+  memzero_explicit(&local_key, sizeof(local_key));
   crng->init_time = jiffies;
-
+  jump_point = 0;
+  gate_key = 0;
 
   if (crng == &primary_crng && crng_init < 2) {
     /*invalidate_batched_entropy();
