@@ -70,7 +70,8 @@ static struct entropy_store input_pool = {
   // #define 
   //#endif
 #endif
-
+static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
+static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
 
 /* 
  * A gate_key ID must be unique no matter how many threads invoke it at the same time.
@@ -175,45 +176,8 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
 
 u64 get_random_u64(void)
 {
-  u64 anvil __latent_entropy;
-  u64 mop __latent_entropy;
-  u64 seed;
-  int key_entry_point;
-  uint64_t gate_key = make_gate_key(&anvil, _RET_IP_);
-  ////int entry_point = gate_key % POOL_SIZE_BITS;
-  ////xor_bits( anvil, runtime_entropy, POOL_SIZE, entry_point, sizeof(anvil));
-  int entry_point = _unique_key(&anvil, gate_key, 0, sizeof(anvil));
-  // XOR over something globally unique.
-  // anything in runtime_entropy could be in use.
-  // Some of the gate_key isn't known to the caller.
-  //anvil ^= gate_key;
-
-  if (arch_get_random_seed_long(&seed)) {
-    //Ok great, lets start with this value from hardware
-    //We don't know if it is good or bad, but it helps.
-    anvil ^= seed;
-    //cleanup - remove entry point:
-    arch_get_random_seed_long(&seed);
-    mop ^= seed;
-  } else {
-
-    // This jumptable pattern follows a similar pattern to the AES counterpart.
-    ////key_entry_point = (int)anvil % POOL_SIZE_BITS;
-    key_entry_point = _unique_key(&anvil, gate_key, entry_point, sizeof(anvil));
-
-    //Get another point of PRNG to scrub the keypool.
-    _unique_key(&mop, gate_key, key_entry_point, sizeof(mop));
-  }
-  //If the mop came from hardware, we want to scrub it before use.
-  //Make sure this mop is unique, more unique is more clean.
-  //mop ^= gate_key;
-  gate_key = 0;
-  //cover our tracks, remove entry point
-  xor_bits( runtime_entropy + entry_point, mop, sizeof(mop), 0, sizeof(mop));
-  entry_point = 0;
-  key_entry_point = 0;
-  //clean the mop
-  mop = 0;
+  u64 anvil;
+  extract_crng_user(&anvil, sizeof(anvil));
   return anvil;
 }
 
@@ -222,38 +186,8 @@ u64 get_random_u64(void)
  */
 u32 get_random_u32(void)
 {
-  u32 anvil __latent_entropy;
-  u32 mop __latent_entropy;
-  long seed;
-  int key_entry_point;
-  int mop_entry_point;
-  //The caller doesn't know the value of gate_key
-  uint64_t gate_key = make_gate_key(&anvil, _RET_IP_);
-  int entry_point = _unique_key(&anvil, gate_key, 0, sizeof(anvil));
-
-  //Do we have a good source of hardware random values?
-  if (arch_get_random_seed_long(&seed)) {
-     //Only 32 bits needed
-     anvil ^= seed;
-     //The other 32 bits are used for cleanup.
-     mop ^= (seed << 32);  
-  } else {
-    // This jumptable pattern follows a similar pattern to the AES counterpart.
-    // We want two distinct points within the key pool.
-    key_entry_point = _unique_key(&anvil, gate_key, entry_point, sizeof(anvil));
-    //Get another point of PRNG to scrub the keypool.
-    _unique_key(&mop, gate_key, key_entry_point, sizeof(mop));
-  }
-  //If the mop came from hardware, we want to scrub it before use.
-  //Make sure this mop is unique, more unique is more clean.
-  mop ^= (u32)*(&gate_key+4);
-  gate_key = 0;
-  //cover our tracks, remove entry point
-  xor_bits( runtime_entropy + entry_point, mop, sizeof(mop), 0, sizeof(anvil));
-  entry_point = 0;
-  key_entry_point = 0;
-  //clean the mop
-  mop = 0;
+  u32 anvil;
+  extract_crng_user(&anvil, sizeof(anvil));
   return anvil;
 }
 /*
@@ -265,20 +199,22 @@ u32 get_random_u32(void)
  */
 u64 get_alternate_rand()
 {
-  u64 a_few_words = 0;
+  u64 anvil;
+  u64 mop;
   //Try every source we know of. Taken from random.c
-  if(!arch_get_random_seed_long(&a_few_words))
+  if(!arch_get_random_seed_long(&anvil))
   {
-      if(!arch_get_random_long(&a_few_words))
+      if(!arch_get_random_long(&anvil))
       {
-         a_few_words ^= random_get_entropy();
+         anvil ^= random_get_entropy();
       }
   }
-  //Well we know one source that won't let us down.
-  if(!a_few_words)
+  //anvil might still be zero - hardware will let you down but we won't
+  //I am not opposed to doubling up on the keypool as a source -
+  // but it seems excessive at this time.
+  if(anvil == 0)
   {
-    u64 anvil __latent_entropy;
-    u64 mop   __latent_entropy;
+    //We know one source that won't let us down.
     make_gate_key(&anvil, _RET_IP_);
 
     //The caller is likely stacking PRNG, we can help.
@@ -288,26 +224,31 @@ u64 get_alternate_rand()
     int key_point = (int)runtime_entropy[start_point] % POOL_SIZE_BITS;
     //If we choose the same point then we xor the same values.
     //Fall to either side, don't prefer one side.
-    if(start_point == key_point){
+    if(start_point == key_point)
+    {
       //flip a coin
-      key_point += (key_point % 2) ? 4 : -4;
+      key_point += (start_point % 2) ? 4 : -4;
     }
     //add this source
     xor_bits(&anvil, runtime_entropy, sizeof(runtime_entropy), start_point, sizeof(anvil));
     xor_bits(&anvil, runtime_entropy, sizeof(runtime_entropy), key_point, sizeof(anvil));
 
-
+    //Establish an additional point of PRNG to clean our entry point.
     int mop_point = (int)runtime_entropy[key_point] % (POOL_SIZE_BITS/8);
+    if(mop_point == start_point)
+    {
+      mop_point += (key_point % 2) ? 4 : -4;
+    }
     //Get another point of PRNG to scrub the keypool.
     mop ^= (u64)*(runtime_entropy + mop_point);
 
+    //The start_point was used as an entry point for PRNG and to generate a jump
+    //Removing this value from the pool will mean that (source,key_point) won't be used again.
     xor_bits(runtime_entropy, mop, sizeof(mop), start_point, sizeof(mop));
     start_point = 0;
     key_point = 0;
-    a_few_words = anvil;
-    anvil = 0;
   }
-  return a_few_words;
+  return anvil;
 }
 
 /*
@@ -328,7 +269,8 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   {
      int shift = nbytes * 8;
      //Protective, make sure that we will pick a unique jump offset.
-     if(shift >= POOL_SIZE_BITS){
+     if(shift >= POOL_SIZE_BITS)
+     {
        //Avoid a ones-complement overflow 
        shift = POOL_SIZE_BITS - 1;
      }
@@ -349,9 +291,12 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   xor_bits(uu_key, runtime_entropy, POOL_SIZE, entry_point, nbytes);
   //make sure this key is distinct from any global state.
   //we use uu_key+5 instead of +4 to account for the entry_byte_boundry.
-  if(nbytes >= 9){
+  if(nbytes >= 9)
+  {
     uu_key[5] ^= (u64)gate_key;
-  }else{
+  }
+  else
+  {
     uu_key[0] ^= (u64)gate_key;
   }
   //return the next offset.
@@ -372,6 +317,10 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     AesOfbContext   aesOfb; 
     size_t amountLeft = nbytes;
     int chunk;
+
+    //todo - check for reseed
+    //crng_reseed(runtime_entropy, runtime_entropy);
+
     //Take everything about this specific call and merge it into one unique word (2 bytes).
     //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
     uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
@@ -413,7 +362,11 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     size_t amountLeft = nbytes;
     int chunk;
     int key_entry_point;
-    //Take everything about this specific call and merge it into one unique word (2 bytes).
+
+    //The user is expecting to get the best restuls.
+    //Watch out, unlimited is coming through - lets tidy the place up. 
+    crng_reseed(runtime_entropy, runtime_entropy);
+
     //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
     uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
     //For key scheduling purposes, the entropy pool acts as a kind of twist table.
@@ -696,7 +649,9 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   int        jump_point = 0;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
+
   //twigs when wrapped together can become loadbearing
+  //extract_crng_user isn't ready.
   //_unique_key() is not safe at this point - but it is unique enough as a seed.
   //We will use it as a jump table, to get chunks.
   //Lets allocate a chunk of memory from the heap
@@ -706,7 +661,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
     //Chunk it in one at a time - which will cause writes to the table.
     jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
   }
-  
+
   //Gather Compile time entropy
   //  - GCC's latent_entropy on anvil, local_key and local_iv
   //  - machine code of this method (EIP), and anything near by.
@@ -738,6 +693,8 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   anvil[3] ^= (u64)&gate_key;
   anvil[5] ^= (u64)jump_point;
   anvil[6] ^= (u64)&jump_point;
+
+  xor_bits(anvil, ZERO_PAGE, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //XOR untouched memory from the heap - any noise here is golden.
   xor_bits(anvil, local_iv, nbytes_needed, nbytes_needed, nbytes_needed);
@@ -799,10 +756,6 @@ random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 static ssize_t
 urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
-  //The user is expecting to get the best restuls.
-  //Watch out, unlimited is coming through - lets tidy the place up. 
-  //todo - wrong inputs?
-  crng_reseed(file, runtime_entropy);
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
   return extract_crng_user_unlimited(buf, nbytes);
@@ -827,13 +780,16 @@ int
     //start empty
     memset(local_block, 0, sizeof local_block); 
  
-    //u32 small = get_random_u32();
-    //u64 mid = get_random_u64();
-    //printf("%l",small);
-    //printf("\n\n");
-    //printf("%llu",mid);
-    //printf("\n\n");
-
+    u32 small = get_random_u32();
+    u64 mid = get_random_u64();
+    printf("%i", small);
+    printf("\n\n");
+    printf("%llu", mid);
+    printf("\n\n");
+    u64 gate_key;
+    gate_key = make_gate_key(&gate_key, _RET_IP_);
+    printf("gate_key:%llu",gate_key);
+    printf("\n\n");
     //lets fill a request
     extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
