@@ -255,8 +255,8 @@ u64 get_alternate_rand()
 
 /*
  * Shuffle in individual bytes into a larger pool.
- * We want to 'spray' bytes across the pool evenly to create 
- * a filed of possilbites, and with each jump more unkown is introduced to this field.
+ * We want to spray bytes across the pool evenly to create a filed of possilbites
+ * With each jump more unkown is introduced to this field.
  * With this shuffling strategy an attacker is forced to work harder, 
  * and it is O(n) to copy bytes using a jump table or with a linear copy.
  * 
@@ -266,9 +266,10 @@ u64 get_alternate_rand()
  * we would lose all bytes. Spreading out the writes helps avoid this problem.
  * At the time of this writing POOL_SIZE is 1kb, and 1kb/per-tick of bandwidth is good.
  *
- * This shuffling stratigy was built to support the writes created by handle_irq_event_percpu()
- * New CPUs can have 64 cores, and _add_unique() is better than having a sigle global lock.
- * 
+ * This shuffling stratigy was built to support the volume of writes created by handle_irq_event_percpu()
+ * New CPUs can have 64 cores, adding more locks doesn't scale - 
+ * However, increasing POOL_SIZE linearly decreases loss of entropy due to write collisions. 
+ * If write collisions from handle_irq_event_percpu() goes up, we can make POOL_SIZE larger.
  */
 void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
 {
@@ -323,18 +324,12 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   if(entry_point == last_jump)
   {
      int shift = nbytes * 8;
-     //Protective, make sure that we will pick a unique jump offset.
-     if(shift >= POOL_SIZE_BITS)
-     {
-       //Avoid a ones-complement overflow 
-       shift = POOL_SIZE_BITS - 1;
-     }
-     //filp a coin and go someplace new and interesting: 
-     if(runtime_entropy[0] % 2)
+     //Flip a coin and go someplace new and interesting: 
+     if(runtime_entropy[entry_point] % 2)
      {
         entry_point += shift;
      }else{
-        entry_point -= shift;
+        entry_point -= shift; 
      }
      //Make sure we are in range.
      entry_point %= POOL_SIZE_BITS;
@@ -478,16 +473,6 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     return nbytes;
 }
 
-/*
- * Credit (or debit) the entropy store with n bits of entropy.
- * Use credit_entropy_bits_safe() if the value comes from userspace
- * or otherwise should be checked for extreme values.
- */
-static void fast_keypool_addition(void *small_pool, long gate_key, int nbytes)
-{
-  int entry_point = gate_key % POOL_SIZE_BITS;
-  xor_bits(runtime_entropy, small_pool, entry_point, POOL_SIZE, nbytes);
-}
 
 /* This function is in fact called more times than I have ever used a phone.
  * lets keep this funciton as light as possilbe, and move more weight to extract_crng_user()
@@ -541,7 +526,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  fast_keypool_addition(fast_pool, gate_key, 4);
+  _add_unique(fast_pool, gate_key, 16);
 }
 
 
@@ -763,14 +748,14 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets what we have now to build stronger keys
-  fast_keypool_addition(anvil, gate_key + jump_point, nbytes_needed);
+  _add_unique(anvil, gate_key + jump_point, nbytes_needed);
   //_unique_key will do its job - the IV and Key will be globally unique
   jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
   jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
   //Reschedule the key so that it is more trustworthy cipher text:
   AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
   //Make the plaintext input used in key derivation distinct:
-  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _unique_key(local_iv, gate_key, jump_point, BLOCK_SIZE);
   jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);  
   AesOfbOutput(&aesOfb, local_iv, sizeof(local_iv));
   AesOfbOutput(&aesOfb, local_key, sizeof(local_key));
@@ -782,14 +767,14 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   AesOfbOutput(&aesOfb, anvil, nbytes_needed);
 
   //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
-  fast_keypool_addition(anvil, gate_key + jump_point, nbytes_needed);
+  _add_unique(anvil, gate_key + jump_point, nbytes_needed);
   //Things are pretty good.
   //The driver is warm, _unique_key() is reasonable.
   //Lets take the keypool for a spin:
   extract_crng_user_unlimited(anvil, nbytes_needed);
 
   //Add this source:
-  fast_keypool_addition(anvil, gate_key, nbytes_needed);
+  _add_unique(anvil, gate_key, nbytes_needed);
 
   //gtg
   free(anvil);
