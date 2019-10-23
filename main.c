@@ -101,7 +101,9 @@ u64 make_gate_key(char *origin_address, long consumer_ip)
   {
     //all 64 bit values adding uniquness to the anvil.
     anvil ^= (u64)consumer_ip ^ (u64)&origin_address ^ (u64)&anvil;
-  }else{
+  }
+  else
+  {
     //These addresses are small so we concat.
     //_THIS_IP_ will be the same for the duration of the runtime. 
     //However, _THIS_IP_ is the instruction pointer which is distict for this boot 
@@ -256,51 +258,62 @@ u64 get_alternate_rand()
  * We want to 'spray' bytes across the pool evenly to create 
  * a filed of possilbites, and with each jump more unkown is introduced to this field.
  * With this shuffling strategy an attacker is forced to work harder, 
- * and it is still just O(n) to copy bytes using a jump table vs linear.
+ * and it is O(n) to copy bytes using a jump table or with a linear copy.
  * 
  * More than one thread maybe using _add_unique() on the same global buffer.
  * There is a 1/POOL_SIZE chance of a collision and a loss of a single bit,
  * if we copied over the new entropy linearly, there is a 1/POOL_SIZE chance 
  * we would lose all bytes. Spreading out the writes helps avoid this problem.
+ * At the time of this writing POOL_SIZE is 1kb, and 1kb/per-tick of bandwidth is good.
+ *
+ * This shuffling stratigy was built to support the writes created by handle_irq_event_percpu()
+ * New CPUs can have 64 cores, and _add_unique() is better than having a sigle global lock.
  * 
  */
-int _add_unique(uint8_t unique[], u64 gate_key, int last_jump, int nbytes)
+void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
 {
-  int jump_point = (gate_key + last_jump) % POOL_SIZE_BITS;
-  int mop = 0;
+  int add_point = (gate_key) % POOL_SIZE;
+  int next_jump = 0;
   for(int i = 0; i < nbytes;i++)
   {
-      mop = (int)runtime_entropy[jump_point];
-      runtime_entropy[jump_point] ^= unique[i];
-      //Keep moving, avoid the same spot
-      if(jump_point == mop){
-        //Don't favor a position, flip a coin instead.
-        if(runtime_entropy[0] % 2){
-          jump_point++;
-        }
-        else
-        {
-          jump_point--;
-        }
-        jump_point %= POOL_SIZE_BITS;
+    //Get a random point, to spray bits accross the buffer.
+    next_jump = (int)runtime_entropy[add_point] % POOL_SIZE;
+    //An attacker should not be able to determine how add_point changes
+    runtime_entropy[add_point] ^= unique[i];
+    //Keep moving, avoid the same spot
+    if(add_point == next_jump)
+    {
+      //Don't favor a position, flip a coin instead.
+      if(runtime_entropy[add_point] % 2)
+      {
+        next_jump++;
       }
       else
       {
-        jump_point = mop;
+        next_jump--;
       }
+      next_jump %= POOL_SIZE_BITS;
+    }
+    add_point = next_jump;
   }
-  mop = 0;
-  return jump_point;
+  next_jump = 0;
+  add_point = 0;
 }
 
 /*
-The race condition in get_universally_unique_key() is intentional.
-We XOR some new uncertity into a global buffer that is being acted upon by other threads. 
-If the new uncertity is applied, then the resulting value is more unique than previous invokation.
-If the new uncertity isn't applied, then this was due to new uncertity being introdued to the global buffer.
-We make sure our local copy is augmented from the global state to insure a univerally unique state.
-Every (offset % POOL_SIZE) produes a 1/POOL_SIZE chase where two get_universally_unique_key() would return the same state. 
-no two threads can ever have the same gate_key - so the result is unique.
+ * The goal of _unique_key is to return universally-unique key material
+ * that an attacker cannot guess.
+ *
+ * The race condition at entry_byte_boundry helps us obtain a value that is difficult to guess.
+ * We XOR some new uncertity into a global buffer that is being acted upon by other threads. 
+ * If the new uncertity is applied, then the resulting value is more unique than previous invokation.
+ * If the new uncertity isn't applied, then this was due to new uncertity being introdued to the global buffer.
+ * Either outcome - the device driver wins because the key is unique.
+ *
+ * We make sure our local copy is augmented from the global state to insure a univerally-unique state.
+ * It is possilbe for two or more threads to have the same jump offsets, however -
+ * Every (offset % POOL_SIZE) produes a 1/POOL_SIZE chase where two get_universally_unique_key() would return the same state. 
+ * no two threads can ever have the same gate_key - so the result is unique.
 */
 int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
 {
