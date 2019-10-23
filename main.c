@@ -252,6 +252,48 @@ u64 get_alternate_rand()
 }
 
 /*
+ * Shuffle in individual bytes into a larger pool.
+ * We want to 'spray' bytes across the pool evenly to create 
+ * a filed of possilbites, and with each jump more unkown is introduced to this field.
+ * With this shuffling strategy an attacker is forced to work harder, 
+ * and it is still just O(n) to copy bytes using a jump table vs linear.
+ * 
+ * More than one thread maybe using _add_unique() on the same global buffer.
+ * There is a 1/POOL_SIZE chance of a collision and a loss of a single bit,
+ * if we copied over the new entropy linearly, there is a 1/POOL_SIZE chance 
+ * we would lose all bytes. Spreading out the writes helps avoid this problem.
+ * 
+ */
+int _add_unique(uint8_t unique[], u64 gate_key, int last_jump, int nbytes)
+{
+  int jump_point = (gate_key + last_jump) % POOL_SIZE_BITS;
+  int mop = 0;
+  for(int i = 0; i < nbytes;i++)
+  {
+      mop = (int)runtime_entropy[jump_point];
+      runtime_entropy[jump_point] ^= unique[i];
+      //Keep moving, avoid the same spot
+      if(jump_point == mop){
+        //Don't favor a position, flip a coin instead.
+        if(runtime_entropy[0] % 2){
+          jump_point++;
+        }
+        else
+        {
+          jump_point--;
+        }
+        jump_point %= POOL_SIZE_BITS;
+      }
+      else
+      {
+        jump_point = mop;
+      }
+  }
+  mop = 0;
+  return jump_point;
+}
+
+/*
 The race condition in get_universally_unique_key() is intentional.
 We XOR some new uncertity into a global buffer that is being acted upon by other threads. 
 If the new uncertity is applied, then the resulting value is more unique than previous invokation.
@@ -775,15 +817,18 @@ int
 {
     uint8_t        local_block[BLOCK_SIZE*2];
     //Assume this is the normal startup procedure from the kernel.
-    load_file(runtime_entropy, POOL_SIZE);
+    //load_file(runtime_entropy, POOL_SIZE);
+    find_more_entropy_in_memory(POOL_SIZE);
+
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
     memset(local_block, 0, sizeof local_block); 
  
     u32 small = get_random_u32();
     u64 mid = get_random_u64();
-    printf("%i", small);
+    printf("%lu", small);
     printf("\n\n");
+    printf("%lu", mid);
     printf("%llu", mid);
     printf("\n\n");
     u64 gate_key;
