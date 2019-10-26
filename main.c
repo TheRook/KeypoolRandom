@@ -65,9 +65,9 @@ static struct entropy_store input_pool = {
 
 //todo covert make_gate_key() into macro... 
 #ifndef _gate_key
-  #define _gate_key( new_key, origin_address )(new_key = (u64)new_key ^ &origin_address ^ &new_key ^ _RET_IP_ ^ _THIS_IP_ )
+  #define _gate_key(new_key)((u64)jiffies ^ (u64)_RET_IP_ ^ (u64)&new_key ^ (u64)_THIS_IP_)
   //#else
-  // #define 
+  //#define _gate_key(new_key)((u32)_RET_IP_ << 32 | ((u32)&new_key ^ (u32)_THIS_IP_))|((u32)_THIS_IP_ << 32 | (u32)&new_key);
   //#endif
 #endif
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
@@ -201,7 +201,7 @@ u32 get_random_u32(void)
  */
 u64 get_alternate_rand()
 {
-  u64 anvil = 0 
+  u64 anvil;
   //Try every source we know of. Taken from random.c
   if(!arch_get_random_seed_long(&anvil))
   {
@@ -279,7 +279,7 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
   for(int i = 0; i < nbytes;i++)
   {
     //Get a random point, to spray bits accross the buffer.
-    next_jump = (int)runtime_entropy[add_point] % POOL_SIZE;
+    next_jump = ((int)runtime_entropy[add_point] + gate_key) % POOL_SIZE;
     //An attacker should not be able to determine how add_point changes
     runtime_entropy[add_point] ^= unique[i];
     //Keep moving, avoid the same spot
@@ -320,7 +320,7 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
 int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
 {
   //Jump table, use the last point as the next point.
-  int entry_point = (int)runtime_entropy[last_jump] % POOL_SIZE_BITS;
+  int entry_point = ((int)runtime_entropy[last_jump] + gate_key) % POOL_SIZE_BITS;
   //There is a 1/POOL_SIZE_BITS chance well jump to the same spot
   if(entry_point == last_jump)
   {
@@ -336,8 +336,10 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
      entry_point %= POOL_SIZE_BITS;
   }
   int entry_byte_boundry = entry_point/8;
-  //Derive uncertity by modifying a global buffer
-  runtime_entropy[entry_byte_boundry + 1] ^= get_alternate_rand();
+  //Get a large random number so that our final state is more distict.
+  u64 nonce = get_alternate_rand();
+  //Introduce uncertity by modifying a global buffer
+  xor_bits(runtime_entropy, nonce, POOL_SIZE, entry_point, sizeof(nonce));
   //make a local copy, which may fall between a byte boundry
   xor_bits(uu_key, runtime_entropy, POOL_SIZE, entry_point, nbytes);
   //make sure this key is distinct from any global state.
