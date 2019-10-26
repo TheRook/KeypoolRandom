@@ -279,6 +279,7 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
   for(int i = 0; i < nbytes;i++)
   {
     //Get a random point, to spray bits accross the buffer.
+    //Add in the gate_key so this jump path is distict
     next_jump = ((int)runtime_entropy[add_point] + gate_key) % POOL_SIZE;
     //An attacker should not be able to determine how add_point changes
     runtime_entropy[add_point] ^= unique[i];
@@ -320,6 +321,7 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
 int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
 {
   //Jump table, use the last point as the next point.
+  //Add in the gate_key so that this jump path is distinct.
   int entry_point = ((int)runtime_entropy[last_jump] + gate_key) % POOL_SIZE_BITS;
   //There is a 1/POOL_SIZE_BITS chance well jump to the same spot
   if(entry_point == last_jump)
@@ -371,9 +373,6 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     size_t amountLeft = nbytes;
     int chunk;
 
-    //todo - check for reseed
-    //crng_reseed(runtime_entropy, runtime_entropy);
-
     //Take everything about this specific call and merge it into one unique word (2 bytes).
     //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
     uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
@@ -418,7 +417,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 
     //The user is expecting to get the best restuls.
     //Watch out, unlimited is coming through - lets tidy the place up. 
-    crng_reseed(runtime_entropy, runtime_entropy);
+    //crng_reseed(runtime_entropy, runtime_entropy);
 
     //User input is combined with the entropy pool state to derive what key material is used for this gate_key.
     uint64_t gate_key = make_gate_key(__user_buf, _RET_IP_);
