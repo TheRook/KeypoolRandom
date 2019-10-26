@@ -155,7 +155,7 @@ void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset
         //end the array with the bit position compliment
         pos = 32 - (bit_offset%32);
       }else{
-              pos = 0;
+        pos = 0;
       }
   }
 }
@@ -201,8 +201,7 @@ u32 get_random_u32(void)
  */
 u64 get_alternate_rand()
 {
-  u64 anvil;
-  u64 mop;
+  u64 anvil = 0 
   //Try every source we know of. Taken from random.c
   if(!arch_get_random_seed_long(&anvil))
   {
@@ -216,6 +215,7 @@ u64 get_alternate_rand()
   // but it seems excessive at this time.
   if(anvil == 0)
   {
+    u64 mop;
     //We know one source that won't let us down.
     make_gate_key(&anvil, _RET_IP_);
 
@@ -249,6 +249,7 @@ u64 get_alternate_rand()
     xor_bits(runtime_entropy, mop, sizeof(mop), start_point, sizeof(mop));
     start_point = 0;
     key_point = 0;
+    mop = 0;
   }
   return anvil;
 }
@@ -464,11 +465,14 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     //Now for the clean-up phase. At this point the key material in aesOfb is very hard to predict. 
     //Encrypt our entropy point with the key material derivied in this local gate_key
     AesOfbOutput( &aesOfb, runtime_entropy + (entry_point / 8), chunk);
+    entry_point = 0;
+    AesOfbOutput( &aesOfb, runtime_entropy + (image_entry_point / 8), chunk);
+    image_entry_point = 0;
+    AesOfbOutput( &aesOfb, runtime_entropy + (key_entry_point / 8), chunk);
+    key_entry_point = 0;
     memzero_explicit(local_image, sizeof(local_image));
     memzero_explicit(local_iv, sizeof(local_iv));
-    entry_point = 0;
-    image_entry_point = 0;
-    key_entry_point = 0;
+    memzero_explicit(local_key, sizeof(local_key));
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
