@@ -258,7 +258,9 @@ u64 get_alternate_rand()
 }
 
 /*
- * Shuffle in individual bytes into a larger pool.
+ * Uniqeness is not only in value, but also position.
+ *
+ * _add_unique() shuffles in individual bytes into a larger pool.
  * We want to spray bytes across the pool evenly to create a filed of possilbites
  * With each jump more unkown is introduced to this field.
  * With this shuffling strategy an attacker is forced to work harder, 
@@ -268,7 +270,7 @@ u64 get_alternate_rand()
  * There is a 1/POOL_SIZE chance of a collision and a loss of a single bit,
  * if we copied over the new entropy linearly, there is a 1/POOL_SIZE chance 
  * we would lose all bytes. Spreading out the writes helps avoid this problem.
- * At the time of this writing POOL_SIZE is 1kb, and 1kb/per-tick of bandwidth is good.
+ * At the time of this writing POOL_SIZE is 1kb, and 1kb/per-tick of bandwidth is just fine.
  *
  * This shuffling stratigy was built to support the volume of writes created by handle_irq_event_percpu()
  * New CPUs can have 64 cores, adding more locks doesn't scale - 
@@ -281,25 +283,11 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
   int next_jump = 0;
   for(int i = 0; i < nbytes;i++)
   {
-    //Get a random point, to spray bits accross the buffer.
+    //Pick a random point to jump to
     //Add in the gate_key so this jump path is distict
     next_jump = ((int)runtime_entropy[add_point] + gate_key) % POOL_SIZE;
     //An attacker should not be able to determine how add_point changes
     runtime_entropy[add_point] ^= unique[i];
-    //Keep moving, avoid the same spot
-    if(add_point == next_jump)
-    {
-      //Don't favor a position, flip a coin instead.
-      if(runtime_entropy[add_point] % 2)
-      {
-        next_jump++;
-      }
-      else
-      {
-        next_jump--;
-      }
-      next_jump %= POOL_SIZE_BITS;
-    }
     add_point = next_jump;
   }
   next_jump = 0;
@@ -476,6 +464,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     entry_point = 0;
     AesOfbOutput( &aesOfb, runtime_entropy + (image_entry_point / 8), chunk);
     image_entry_point = 0;
+    //Whipe out the very last key point we used:
     AesOfbOutput( &aesOfb, runtime_entropy + (key_entry_point / 8), chunk);
     key_entry_point = 0;
     memzero_explicit(local_image, sizeof(local_image));
@@ -702,10 +691,39 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   int        jump_point = 0;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
+  //Start with noise in the pool for the jump table.
+  //This will ensure that _unique_key() works
+  crng_reseed();
+
+  //Gather Compile time entropy
+  //  - GCC's latent_entropy on anvil, local_key and local_iv
+  //  - machine code of this method (EIP), and anything near by.
+  //  - machine code of whoever called us, and anything near by.
+  //Copy recentally used instructions from the caller
+  _add_unique(_RET_IP_ - nbytes_needed, gate_key, nbytes_needed);
+  _add_unique(_RET_IP_, gate_key, nbytes_needed);
+  //Copy from the instructions around us:
+  _add_unique(_THIS_IP_ - nbytes_needed, gate_key, nbytes_needed);
+  _add_unique(_THIS_IP_, gate_key, nbytes_needed);
+
+  //Gather Runtime Entropy
+  //  - Data from the zero page
+  //  - Memory addresses from the stack and heap
+  //  - Unset memory on the heap that may contain noise
+  //  - Unallocated memory that maybe have used or in use
+  //Copy from the zero page, contains HW IDs from the bios
+  _add_unique(ZERO_PAGE, gate_key, nbytes_needed);
+
+  //XOR untouched memory from the heap - any noise here is golden.
+  _add_unique(local_iv, gate_key, nbytes_needed);
+  //XOR memory from the heap that we haven't allocated
+  //is there a part of the bss that would be good to copy from?
+  _add_unique(local_iv + nbytes_needed, gate_key, nbytes_needed);
+  _add_unique(local_iv - nbytes_needed, gate_key, nbytes_needed);
 
   //twigs when wrapped together can become loadbearing
-  //extract_crng_user isn't ready.
-  //_unique_key() is not safe at this point - but it is unique enough as a seed.
+  //_unique_key() might not be not safe at this point  
+  // - but it is unique enough as a seed.
   //We will use it as a jump table, to get chunks.
   //Lets allocate a chunk of memory from the heap
   //we are not setting the memory any noise here is gold
@@ -714,25 +732,6 @@ static void find_more_entropy_in_memory(int nbytes_needed)
     //Chunk it in one at a time - which will cause writes to the table.
     jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
   }
-
-  //Gather Compile time entropy
-  //  - GCC's latent_entropy on anvil, local_key and local_iv
-  //  - machine code of this method (EIP), and anything near by.
-  //  - machine code of whoever called us, and anything near by.
-  //Copy recentally used instructions from the caller
-  xor_bits(anvil, _RET_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
-  xor_bits(anvil, _RET_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
-  //Copy from the instructions around us:
-  xor_bits(anvil, _THIS_IP_, nbytes_needed, nbytes_needed, nbytes_needed);
-  xor_bits(anvil, _THIS_IP_ - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
-
-  //Gather Runtime Entropy
-  //  - Data from the zero page
-  //  - Memory addresses from the stack and heap
-  //  - Unset memory on the heap that may contain noise
-  //  - Unallocated memory that maybe have used or in use
-  //Copy from the zero page, contains HW IDs from the bios
-  xor_bits(anvil, ZERO_PAGE, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets add as many easily accessable unknowns as we can:
   //Even without ASLR some addresses can be more difficult to guess than others.
@@ -747,18 +746,14 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   anvil[5] ^= (u64)jump_point;
   anvil[6] ^= (u64)&jump_point;
 
-  xor_bits(anvil, ZERO_PAGE, nbytes_needed, nbytes_needed, nbytes_needed);
-
-  //XOR untouched memory from the heap - any noise here is golden.
-  xor_bits(anvil, local_iv, nbytes_needed, nbytes_needed, nbytes_needed);
-  //XOR memory from the heap that we haven't allocated
-  //is there a part of the bss that would be good to copy from?
-  xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
-  xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  //xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  //xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that was used before our execution
-  xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  _add_unique(anvil + nbytes_needed, gate_key, nbytes_needed);
+  //xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that hasn't been used
-  xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
+  _add_unique(anvil - nbytes_needed, gate_key, nbytes_needed);
+  //xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets what we have now to build stronger keys
   _add_unique(anvil, gate_key + jump_point, nbytes_needed);
@@ -781,9 +776,10 @@ static void find_more_entropy_in_memory(int nbytes_needed)
 
   //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
   _add_unique(anvil, gate_key + jump_point, nbytes_needed);
-  //Things are pretty good.
-  //The driver is warm, _unique_key() is reasonable.
-  //Lets take the keypool for a spin:
+  //Things are pretty good
+  //The driver is warm, we have used /dev/random.
+  //It is reasonable to assume _unique_key() is globally unique
+  //Lets take /dev/urandom for a spin:
   extract_crng_user_unlimited(anvil, nbytes_needed);
 
   //Add this source:
