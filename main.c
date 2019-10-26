@@ -64,6 +64,9 @@ static struct entropy_store input_pool = {
 
 
 //todo covert make_gate_key() into macro... 
+//_THIS_IP_ must be called from a macro to make it distinct.
+//A gate key works much better as macro because _RET_IP_ and _THIS_IP_ will be more distinct
+//If _gate_key() was a funciton then _THIS_IP_ will be the same every time.
 #ifndef _gate_key
   #define _gate_key(new_key)((u64)jiffies ^ (u64)_RET_IP_ ^ (u64)&new_key ^ (u64)_THIS_IP_)
   //#else
@@ -339,9 +342,9 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   }
   int entry_byte_boundry = entry_point/8;
   //Get a large random number so that our final state is more distict.
-  u64 nonce = get_alternate_rand();
+  u64 anvil ^= get_alternate_rand();
   //Introduce uncertity by modifying a global buffer
-  xor_bits(runtime_entropy, nonce, POOL_SIZE, entry_point, sizeof(nonce));
+  xor_bits(runtime_entropy, anvil, POOL_SIZE, entry_point, sizeof(anvil));
   //make a local copy, which may fall between a byte boundry
   xor_bits(uu_key, runtime_entropy, POOL_SIZE, entry_point, nbytes);
   //make sure this key is distinct from any global state.
@@ -440,8 +443,9 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         //By including an outside source every block, we ensure an unlimited supply of PRNG.
         //Even if a hardware rand isn't available, we'll generate a random value without AES.
         //This step raises the bar, and some PRNGs will use zeros here:
-        *local_image ^= get_alternate_rand();
-        *(local_image + 4) ^= get_alternate_rand();
+        u64 anvil ^= get_alternate_rand();
+        //Drop an anvil on it
+        xor_bits(local_image, anvil, sizeof(local_image), 0, sizeof(anvil));
 
         //Generate one block of PRNG
         AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
