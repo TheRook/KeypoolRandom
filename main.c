@@ -277,10 +277,11 @@ u64 get_alternate_rand()
  * However, increasing POOL_SIZE linearly decreases loss of entropy due to write collisions. 
  * If write collisions from handle_irq_event_percpu() goes up, we can make POOL_SIZE larger.
  */
-void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
+int _add_unique(uint8_t unique[], u64 gate_key, int last_jump, int nbytes)
 {
-  int add_point = (gate_key) % POOL_SIZE;
+  int add_point = (gate_key + last_jump) % POOL_SIZE;
   int next_jump = 0;
+  //Copy bytes with a jump table - O(n)
   for(int i = 0; i < nbytes;i++)
   {
     //Pick a random point to jump to
@@ -290,8 +291,9 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
     runtime_entropy[add_point] ^= unique[i];
     add_point = next_jump;
   }
-  next_jump = 0;
+
   add_point = 0;
+  return next_jump;
 }
 
 /*
@@ -314,7 +316,8 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   u64 anvil;
   //Jump table, use the last point as the next point.
   //Add in the gate_key so that this jump path is distinct.
-  int entry_point = ((int)runtime_entropy[last_jump] + gate_key) % POOL_SIZE_BITS;
+  int jump_byte_boundry = last_jump / 8;
+  int entry_point = ((int)runtime_entropy[jump_byte_boundry] + gate_key) % POOL_SIZE_BITS;
   //There is a 1/POOL_SIZE_BITS chance well jump to the same spot
   if(entry_point == last_jump)
   {
@@ -329,7 +332,6 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
      //Make sure we are in range.
      entry_point %= POOL_SIZE_BITS;
   }
-  int entry_byte_boundry = entry_point/8;
   //Get a large random number so that our final state is more distict.
   anvil ^= get_alternate_rand();
   //Introduce uncertity by modifying a global buffer
@@ -337,15 +339,15 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   anvil = 0;
   //make a local copy, which may fall between a byte boundry
   xor_bits(uu_key, runtime_entropy, POOL_SIZE, entry_point, nbytes);
-  //make sure this key is distinct from any global state.
+  //Make the derived key more distict by adding this session's gate_key
   //we use uu_key+5 instead of +4 to account for the entry_byte_boundry.
   if(nbytes >= 9)
   {
-    uu_key[5] ^= (u64)gate_key;
+    uu_key[5] ^= (gate_key + last_jump);
   }
   else
   {
-    uu_key[0] ^= (u64)gate_key;
+    uu_key[0] ^= (gate_key + last_jump);
   }
   //return the next offset.
   return entry_point;
@@ -528,7 +530,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  _add_unique(fast_pool, gate_key, 16);
+  _add_unique(fast_pool, gate_key, 0, 16);
 }
 
 
@@ -691,20 +693,31 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   int        jump_point = 0;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
 
+  anvil = (uint8_t *)malloc(nbytes_needed);
+  void *points_of_interest[] = {
+    ZERO_PAGE,
+    _RET_IP_,
+    _THIS_IP_,
+    anvil,
+    &anvil,
+    gate_key,
+    &gate_key
+  };
+
   //Start with noise in the pool for the jump table.
-  //This will ensure that _unique_key() works
-  crng_reseed();
+  //This will ensure that _unique_key() works and doesn't depend on __latent_entropy
+  crng_reseed(runtime_entropy, runtime_entropy);
 
   //Gather Compile time entropy
   //  - GCC's latent_entropy on anvil, local_key and local_iv
   //  - machine code of this method (EIP), and anything near by.
   //  - machine code of whoever called us, and anything near by.
   //Copy recentally used instructions from the caller
-  _add_unique(_RET_IP_ - nbytes_needed, gate_key, nbytes_needed);
-  _add_unique(_RET_IP_, gate_key, nbytes_needed);
+  jump_point = _add_unique(_RET_IP_ - nbytes_needed, gate_key, jump_point, nbytes_needed);
+  jump_point = _add_unique(_RET_IP_, gate_key, jump_point, nbytes_needed);
   //Copy from the instructions around us:
-  _add_unique(_THIS_IP_ - nbytes_needed, gate_key, nbytes_needed);
-  _add_unique(_THIS_IP_, gate_key, nbytes_needed);
+  jump_point = _add_unique(_THIS_IP_ - nbytes_needed, gate_key, jump_point, nbytes_needed);
+  jump_point = _add_unique(_THIS_IP_, gate_key, jump_point, nbytes_needed);
 
   //Gather Runtime Entropy
   //  - Data from the zero page
@@ -712,14 +725,14 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //  - Unset memory on the heap that may contain noise
   //  - Unallocated memory that maybe have used or in use
   //Copy from the zero page, contains HW IDs from the bios
-  _add_unique(ZERO_PAGE, gate_key, nbytes_needed);
+  jump_point = _add_unique(ZERO_PAGE, gate_key, jump_point, nbytes_needed);
 
   //XOR untouched memory from the heap - any noise here is golden.
-  _add_unique(local_iv, gate_key, nbytes_needed);
+  jump_point = _add_unique(local_iv, gate_key, jump_point, nbytes_needed);
   //XOR memory from the heap that we haven't allocated
   //is there a part of the bss that would be good to copy from?
-  _add_unique(local_iv + nbytes_needed, gate_key, nbytes_needed);
-  _add_unique(local_iv - nbytes_needed, gate_key, nbytes_needed);
+  jump_point = _add_unique(local_iv + nbytes_needed, gate_key, jump_point,  nbytes_needed);
+  jump_point = _add_unique(local_iv - nbytes_needed, gate_key, jump_point, nbytes_needed);
 
   //twigs when wrapped together can become loadbearing
   //_unique_key() might not be not safe at this point  
@@ -727,7 +740,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //We will use it as a jump table, to get chunks.
   //Lets allocate a chunk of memory from the heap
   //we are not setting the memory any noise here is gold
-  anvil = (uint8_t *)malloc(nbytes_needed);
+  
   for(int block_index=0; block_index < nbytes_needed; block_index+=BLOCK_SIZE){
     //Chunk it in one at a time - which will cause writes to the table.
     jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
@@ -749,16 +762,18 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that was used before our execution
-  _add_unique(anvil + nbytes_needed, gate_key, nbytes_needed);
+  jump_point = _add_unique(anvil + nbytes_needed, gate_key, jump_point,  nbytes_needed);
   //xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that hasn't been used
-  _add_unique(anvil - nbytes_needed, gate_key, nbytes_needed);
+  jump_point = _add_unique(anvil - nbytes_needed, gate_key, jump_point, nbytes_needed);
   //xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
 
   //Lets what we have now to build stronger keys
-  _add_unique(anvil, gate_key + jump_point, nbytes_needed);
-  //_unique_key will do its job - the IV and Key will be globally unique
-  jump_point = _unique_key(local_iv, gate_key, 0, BLOCK_SIZE);
+  jump_point = _add_unique(anvil, gate_key, jump_point, nbytes_needed);
+
+  //We have added a lot to the pool at this point.
+  //_unique_key will do its job - the IV and Key will be _globally_ unique
+  jump_point = _unique_key(local_iv, gate_key, jump_point, BLOCK_SIZE);
   jump_point = _unique_key(local_key, gate_key, jump_point, BLOCK_SIZE);
   //Reschedule the key so that it is more trustworthy cipher text:
   AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
@@ -770,22 +785,21 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //A block cipher is used as a KDF when we have low-entropy
   //The keys will be pure PRNG from a trusted block cipher like AES:
   AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
-
   //Use this new block-cipher PRNG as the hammer for the anvil
   AesOfbOutput(&aesOfb, anvil, nbytes_needed);
-
   //We don't need fast_mix to shuffle our bits, the block cipher has done enough of this.
-  _add_unique(anvil, gate_key + jump_point, nbytes_needed);
-  //Things are pretty good
-  //The driver is warm, we have used /dev/random.
+  jump_point = _add_unique(anvil, gate_key, jump_point, nbytes_needed);
+
+  //Things are better, the driver is warm
   //It is reasonable to assume _unique_key() is globally unique
   //Lets take /dev/urandom for a spin:
   extract_crng_user_unlimited(anvil, nbytes_needed);
 
-  //Add this source:
-  _add_unique(anvil, gate_key, nbytes_needed);
+  //Add our best feedback-PRNG as a source
+  jump_point = _add_unique(anvil, gate_key, jump_point, nbytes_needed);
+  jump_point = 0;
 
-  //gtg
+  //Ready to serve requests.
   free(anvil);
 }
 
