@@ -323,6 +323,7 @@ void _add_unique(uint8_t unique[], u64 gate_key, int nbytes)
 */
 int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
 {
+  u64 anvil;
   //Jump table, use the last point as the next point.
   //Add in the gate_key so that this jump path is distinct.
   int entry_point = ((int)runtime_entropy[last_jump] + gate_key) % POOL_SIZE_BITS;
@@ -342,9 +343,10 @@ int _unique_key(uint8_t uu_key[], u64 gate_key, int last_jump, int nbytes)
   }
   int entry_byte_boundry = entry_point/8;
   //Get a large random number so that our final state is more distict.
-  u64 anvil ^= get_alternate_rand();
+  anvil ^= get_alternate_rand();
   //Introduce uncertity by modifying a global buffer
   xor_bits(runtime_entropy, anvil, POOL_SIZE, entry_point, sizeof(anvil));
+  anvil = 0;
   //make a local copy, which may fall between a byte boundry
   xor_bits(uu_key, runtime_entropy, POOL_SIZE, entry_point, nbytes);
   //make sure this key is distinct from any global state.
@@ -413,6 +415,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     uint8_t   local_key[BLOCK_SIZE] __latent_entropy;
     uint8_t   local_iv[BLOCK_SIZE] __latent_entropy;
     uint8_t   local_image[BLOCK_SIZE] __latent_entropy;
+    u64 anvil;
     AesOfbContext   aesOfb;
     size_t amountLeft = nbytes;
     int chunk;
@@ -443,7 +446,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         //By including an outside source every block, we ensure an unlimited supply of PRNG.
         //Even if a hardware rand isn't available, we'll generate a random value without AES.
         //This step raises the bar, and some PRNGs will use zeros here:
-        u64 anvil ^= get_alternate_rand();
+        anvil ^= get_alternate_rand();
         //Drop an anvil on it
         xor_bits(local_image, anvil, sizeof(local_image), 0, sizeof(anvil));
 
@@ -478,6 +481,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     memzero_explicit(local_image, sizeof(local_image));
     memzero_explicit(local_iv, sizeof(local_iv));
     memzero_explicit(local_key, sizeof(local_key));
+    anvil = 0;
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
