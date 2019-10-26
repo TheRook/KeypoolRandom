@@ -494,7 +494,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   uint64_t gate_key = make_gate_key(&irq, _RET_IP_);
   //Other itterupts are unlikely to choose our same entry_point
   int entry_point = gate_key % (POOL_SIZE - 4);
-  uint8_t  *fast_pool;// = this_cpu_ptr(&irq_randomness);
+  u64  fast_pool[4];// = this_cpu_ptr(&irq_randomness);
   struct pt_regs    *regs = get_irq_regs();
   unsigned long   now = jiffies;
   //irq_flags contains a few bits, and every bit counts.
@@ -530,7 +530,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
   //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  _add_unique(fast_pool, gate_key, 0, 16);
+  _add_unique(fast_pool, gate_key, 0, 32);
 }
 
 
@@ -689,23 +689,29 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //latent_entropy will give us somthing, which is the point of the plugin.
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
-  uint8_t    *anvil;
   int        jump_point = 0;
+  uint8_t    *anvil;
   u64        gate_key = make_gate_key(&anvil, _RET_IP_);
-
   anvil = (uint8_t *)malloc(nbytes_needed);
+
+  //Lets add as many easily accessable unknowns as we can:
+  //Even without ASLR some addresses can be more difficult to guess than others.
+  //With ASLR, this would be paritally feedback noise, with offsets.
+  //Add any addresses that are unknown under POOL_SIZE
+  //16 addresses for 64-bit is ideal, 32 should use 32 addresses to make 1024 bits.
+  //Todo: use a debugger to find the 32 hardest to guess addresses.
   void *points_of_interest[] = {
-    ZERO_PAGE,
-    _RET_IP_,
-    _THIS_IP_,
-    anvil,
-    &anvil,
-    gate_key,
-    &gate_key
+      ZERO_PAGE,
+      _RET_IP_,
+      _THIS_IP_,
+      anvil,
+      &anvil,
+      gate_key,
+      &gate_key
   };
 
   //Start with noise in the pool for the jump table.
-  //This will ensure that _unique_key() works and doesn't depend on __latent_entropy
+  //This will ensure that _unique_key() doesn't depend on __latent_entropy
   crng_reseed(runtime_entropy, runtime_entropy);
 
   //Gather Compile time entropy
@@ -726,7 +732,6 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //  - Unallocated memory that maybe have used or in use
   //Copy from the zero page, contains HW IDs from the bios
   jump_point = _add_unique(ZERO_PAGE, gate_key, jump_point, nbytes_needed);
-
   //XOR untouched memory from the heap - any noise here is golden.
   jump_point = _add_unique(local_iv, gate_key, jump_point, nbytes_needed);
   //XOR memory from the heap that we haven't allocated
@@ -740,34 +745,24 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   //We will use it as a jump table, to get chunks.
   //Lets allocate a chunk of memory from the heap
   //we are not setting the memory any noise here is gold
-  
   for(int block_index=0; block_index < nbytes_needed; block_index+=BLOCK_SIZE){
     //Chunk it in one at a time - which will cause writes to the table.
     jump_point = _unique_key(anvil + block_index, gate_key, jump_point, BLOCK_SIZE);
   }
 
-  //Lets add as many easily accessable unknowns as we can:
-  //Even without ASLR some addresses can be more difficult to guess than others.
-  //With ASLR, this would be paritally feedback noise, with offsets.
-  //Add any addresses that are unknown under POOL_SIZE
-  //16 addresses for 64-bit is ideal, 32 should use 32 addresses to make 1024 bits.
-  //Todo: use a debugger to find the 32 hardest to guess addresses.
-  anvil[0] ^= (u64)&anvil;
-  anvil[1] ^= (u64)_RET_IP_;
-  anvil[2] ^= (u64)_THIS_IP_;
-  anvil[3] ^= (u64)&gate_key;
-  anvil[5] ^= (u64)jump_point;
-  anvil[6] ^= (u64)&jump_point;
+  int number_of_points = sizeof(points_of_interest)/sizeof(points_of_interest[0]);
+  for(int i = 0;i < number_of_points; i++){
+    u64 * hammer;
+    hammer =  &anvil[i * 8];
+    *hammer ^= (u64)points_of_interest[i];
+  }
 
-  //xor_bits(anvil, local_iv - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
-  //xor_bits(anvil, local_iv + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that was used before our execution
   jump_point = _add_unique(anvil + nbytes_needed, gate_key, jump_point,  nbytes_needed);
   //xor_bits(anvil, anvil + nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
   //Copy memory from the stack that hasn't been used
   jump_point = _add_unique(anvil - nbytes_needed, gate_key, jump_point, nbytes_needed);
   //xor_bits(anvil, anvil - nbytes_needed, nbytes_needed, nbytes_needed, nbytes_needed);
-
   //Lets what we have now to build stronger keys
   jump_point = _add_unique(anvil, gate_key, jump_point, nbytes_needed);
 
@@ -799,7 +794,7 @@ static void find_more_entropy_in_memory(int nbytes_needed)
   jump_point = _add_unique(anvil, gate_key, jump_point, nbytes_needed);
   jump_point = 0;
 
-  //Ready to serve requests.
+  //Flying now.
   free(anvil);
 }
 
