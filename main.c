@@ -181,18 +181,23 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
 
 u64 get_random_u64(void)
 {
-  u64 anvil;
-  extract_crng_user(&anvil, sizeof(anvil));
+  u64 anvil __latent_entropy;
+  u64 gatekey = __make_gatekey(&anvil);
+  _unique_key(&anvil, gatekey, sizeof(anvil));
   return anvil;
 }
 
 /* 
  * we want to return just one byte as quickly as possilbe. 
+ * not use in using a 128 or 256-bit cypher for 32 bits
+ * __make_gatekey is plenty unique for this purpose
+ * get_random_u32 is for intenal users
  */
 u32 get_random_u32(void)
 {
-  u32 anvil;
-  extract_crng_user(&anvil, sizeof(anvil));
+  u32 anvil __latent_entropy;
+  u64 gatekey = __make_gatekey(&anvil);
+  _unique_key(&anvil, gatekey, sizeof(anvil));
   return anvil;
 }
 
@@ -259,6 +264,7 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
   u64 fourth_layer = 0;
   int upper_bound = 0;
   //A mop for cleanup
+  int mop_index = 0;
   u64 mop __latent_entropy;
   //A distinct mop is a better mop
   mop ^= gatekey;
@@ -270,19 +276,21 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
     chunk = __min(POOL_SIZE, nbytes);
     int current_pos = nbytes - chunk;
 
+    mop_index = mop % POOL_SIZE_BITS;
     //Establish an additional point for cleaning up our tracks
     //We XOR the mop with a good source of PRNG - now the mop is "clean"
-    xor_bits(&mop, runtime_entropy, sizeof(runtime_entropy), mop, sizeof(mop));
+    xor_bits(&mop, runtime_entropy, sizeof(runtime_entropy), mop_index, sizeof(mop));
     //Using this mop we clean up key points immeditaly after use.
 
     //We need a unique value from a global buffer
+    //Use the mop to clean the state ahead of ths jump
     //We modify it, read it, then modify it
-    //We want to maintain global uniqueness, local uniqueness and secrecy.
+    //We want to maintain global uniqueness, local uniqueness, and secrecy.
     runtime_entropy[first_layer % POOL_SIZE] ^= (u16)mop+6;
     second_layer = (u64)runtime_entropy[first_layer % POOL_SIZE];
-    //Make our jump path unique.
+    //Make our jump path locally unique
     second_layer ^= gatekey;
-    //If we choose the same point then we xor the same values.
+    //If we choose the same point then we XOR the same values.
     //Fall to either side, don't prefer one side.
     if((first_layer % POOL_SIZE_BITS) == (second_layer % POOL_SIZE_BITS))
     {
@@ -334,6 +342,10 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
     //Add the final layer
     xor_bits(&unique + current_pos, runtime_entropy, sizeof(runtime_entropy), fourth_layer, chunk);
 
+    //Make sure the mop is clean
+    //There is a small chance we'll reuse the same mop_index, so the value must change
+    xor_bits(runtime_entropy, &unique + current_pos, sizeof(runtime_entropy), mop_index, sizeof(mop));
+    
     //Change our inital layer by 1 byte
     //If we need more blocks then keep rotating our first layer.
     first_layer += 8;
@@ -441,10 +453,10 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     _unique_key(local_key, gatekey, BLOCK_SIZE);
 
     //Generate one block of PRNG
-    AesOfbInitialiseWithKey( &aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+    AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
     
     //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-    AesOfbOutput( &aesOfb, __user_buf, nbytes);
+    AesOfbOutput(&aesOfb, __user_buf, nbytes);
 
     //Zero out memeory to prevent backtracking
     memzero_explicit(local_iv, sizeof(local_iv));
@@ -459,6 +471,12 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
 // it is simlar to the algorithm above, but more time is spent procuring stronger key mateiral.
 // the user is willing to wait, so we'll do our very best.
 // when this method completes, the keypool as a whole is better off, as it will be re-scheduled.
+ /*
+ *
+ * Rolling accumulator keys
+ * Key, IV, and Image accumulate entropy with each operation
+ * They are never overwritten, only XOR'ed with the previous value
+ */
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
     //Three "pools" that will be filled
@@ -478,8 +496,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     while( amountLeft > 0 )
     {
         chunk = __min(amountLeft, BLOCK_SIZE );
-        //rescheudle they key each round - it will be more difficult to guess
-        //This routine needs the hardest to guess key we can get
+        //rescheudle the key each round - it will be more difficult to guess
         _unique_key(key_accumulator, gatekey, BLOCK_SIZE);
         _unique_key(iv_accumulator, gatekey, BLOCK_SIZE);
         _unique_key(image_accumulator, gatekey, BLOCK_SIZE);
@@ -577,6 +594,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   int crng_init;
   int   i, num;
   u64 gatekey; 
+  u8         fresh_prng[POOL_SIZE];
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
   union {
@@ -597,9 +615,14 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
   AesOfbOutput(&aesOfb, crng->state, POOL_SIZE); 
 
+  //We bathe in the purest PRNG
+  extract_crng_user_unlimited(fresh_prng, POOL_SIZE);
+  _add_unique(fresh_prng, POOL_SIZE);
+
   memzero_explicit(&buf, sizeof(buf));
   memzero_explicit(&local_iv, sizeof(local_iv));
   memzero_explicit(&local_key, sizeof(local_key));
+  memzero_explicit(fresh_prng, POOL_SIZE);
   crng->init_time = jiffies;
   gatekey = 0;
 
