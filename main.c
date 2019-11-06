@@ -75,6 +75,7 @@ static struct entropy_store input_pool = {
 #endif
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
+void _unique_key(u64 uu_key[], u64 gatekey, int nbytes);
 
 /* 
  * A gatekey ID must be unique no matter how many threads invoke it at the same time.
@@ -177,13 +178,14 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
  * The goal here is to be fast
  * the user needs less 1 block, they only need two words.
  * Lets fill the request as quickly as we can.
+ * we add __latent_entropy, because we are called early in execution
+ * it is good to have all the sources we can get.
  */
-
 u64 get_random_u64(void)
 {
   u64 anvil __latent_entropy;
   u64 gatekey = __make_gatekey(&anvil);
-  _unique_key(&anvil, gatekey, sizeof(anvil));
+  _unique_key((u64 *)&anvil, gatekey, sizeof(anvil));
   return anvil;
 }
 
@@ -409,19 +411,18 @@ u64 _alternate_rand()
 */
 void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
 {
-  u64 anvil __latent_entropy;
+  u64 anvil;
   anvil ^= _alternate_rand();
- 
-  //log2((1024*8)^4)
-  //2^52 chance of a 4 layer collision during a race condition.
-  _get_unique(uu_key, gatekey, nbytes);
-  
   //Make sure our local state is distinct from any global state
   //We don't have a word for the number 2^52
   //We can make it an even less likely collision 
   // - by adding an additonal 128 bits of variablity.
   xor_bits(uu_key, &gatekey, sizeof(gatekey), 0, nbytes);
   xor_bits(uu_key, &anvil, sizeof(anvil), sizeof(gatekey), nbytes);
+
+  //Pull in layers of PRNG
+  _get_unique(uu_key, gatekey, nbytes);
+
   gatekey = 0;
   anvil = 0;
 }
@@ -585,8 +586,6 @@ void add_interrupt_randomness(int irq, int irq_flags)
   _add_unique(fast_pool, gatekey, 32);
 }
 
-
-
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 {
   AesOfbContext   aesOfb; 
@@ -617,7 +616,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
 
   //We bathe in the purest PRNG
   extract_crng_user_unlimited(fresh_prng, POOL_SIZE);
-  _add_unique(fresh_prng, POOL_SIZE);
+  _add_unique(fresh_prng, gatekey, POOL_SIZE);
 
   memzero_explicit(&buf, sizeof(buf));
   memzero_explicit(&local_iv, sizeof(local_iv));
