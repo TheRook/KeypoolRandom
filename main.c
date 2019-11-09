@@ -223,18 +223,18 @@ u32 get_random_u32(void)
  * However, increasing POOL_SIZE linearly decreases loss of entropy due to write collisions. 
  * If write collisions from handle_irq_event_percpu() goes up, we can make POOL_SIZE larger.
  */
-void _add_unique(uint8_t unique[], u64 gatekey, int nbytes)
+void _add_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gatekey, int nbytes)
 {
-  u64 anvil_addr = gatekey % POOL_SIZE;
+  u64 anvil_addr = gatekey % keypool_size;
   u64 next_jump = 0;
   //Copy bytes with a jump table - O(n)
   for(int i = 0; i < nbytes;i++)
   {
     //Pick a random point to jump to
     //Add in the gatekey so this jump path is distict
-    next_jump = ((u64)runtime_entropy[anvil_addr] + gatekey) % POOL_SIZE;
+    next_jump = ((u64)keypool[anvil_addr] + gatekey) % keypool_size;
     //A strike
-    runtime_entropy[anvil_addr] ^= unique[i];
+    keypool[anvil_addr] ^= unique[i];
     anvil_addr = next_jump;
   }
   next_jump = 0;
@@ -253,14 +253,17 @@ void _add_unique(uint8_t unique[], u64 gatekey, int nbytes)
  * This isn't the 2^128 or 2^256 that we want to expose as an interface.
  *
  * Each of the four layers must be unique, to prevent a^a=0
+ *
+ * A mop is used to clean up to make sure key and index values are never re-used.
+ * A cleanup phase in this method reduces the need for rescheudling the entire pool.
  * 
  */
-void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
+void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gatekey, int nbytes)
 {
   //The caller has the option of stacking PRNG
   //Lets use the keypool with a jump table -
   //this jumptable pattern follows a similar pattern to the AES counterpart.
-  u64 first_layer = gatekey;
+  u64 first_layer = keypool[gatekey % keypool_size];
   u64 second_layer = 0;
   u64 third_layer = 0;
   u64 fourth_layer = 0;
@@ -281,7 +284,7 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
     mop_index = mop % POOL_SIZE_BITS;
     //Establish an additional point for cleaning up our tracks
     //We XOR the mop with a good source of PRNG - now the mop is "clean"
-    xor_bits(&mop, runtime_entropy, sizeof(runtime_entropy), mop_index, sizeof(mop));
+    xor_bits(&mop, keypool, keypool_size, mop_index, sizeof(mop));
     //Using this mop we clean up key points immeditaly after use.
 
     //We need a unique value from a global buffer
@@ -289,7 +292,7 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
     //We modify it, read it, then modify it
     //We want to maintain global uniqueness, local uniqueness, and secrecy.
     runtime_entropy[first_layer % POOL_SIZE] ^= (u16)mop+6;
-    second_layer = (u64)runtime_entropy[first_layer % POOL_SIZE];
+    second_layer = (u64)keypool[first_layer % POOL_SIZE];
     //Make our jump path locally unique
     second_layer ^= gatekey;
     //If we choose the same point then we XOR the same values.
@@ -301,12 +304,19 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
     }
 
     //Get our first layer in place
-    xor_bits(&unique + current_pos, runtime_entropy, sizeof(runtime_entropy), first_layer, chunk);
+    xor_bits(&unique + current_pos, keypool, keypool_size, first_layer, chunk);
+    u16 first_mop = (u16)&mop+4;
+    if(first_mop == 0)
+    {
+      //we can't be zero otherwise the second invocation with the same gatekey
+      // - might overlap.
+      first_mop++;
+    }
     //Cleanup our keyspace
-    xor_bits(runtime_entropy, &mop+4, 2, first_layer, 2);
+    xor_bits(keypool, first_mop, 2, first_layer, 2);
     //Add the next layer
-    xor_bits(&unique + current_pos, runtime_entropy, sizeof(runtime_entropy), second_layer, chunk);
-    xor_bits(runtime_entropy, &mop+2, 2, second_layer,2);
+    xor_bits(&unique + current_pos, keypool, keypool_size, second_layer, chunk);
+    xor_bits(keypool, &mop+2, 2, second_layer,2);
 
     //We'll generate a new jumppoint that is unique to us
     //Move the anvil and mave sure it doesn't overlap
@@ -322,8 +332,8 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
       third_layer = (u64)unique % ((second_layer % POOL_SIZE_BITS) - 1);
     }
     //This layer is distinct
-    xor_bits(&unique + current_pos, runtime_entropy, sizeof(runtime_entropy), third_layer, chunk);
-    xor_bits(runtime_entropy, &mop, 2, third_layer,2);
+    xor_bits(&unique + current_pos, keypool, keypool_size, third_layer, chunk);
+    xor_bits(keypool, &mop, 2, third_layer,2);
 
     //Now for the final layer
     fourth_layer = (u64)unique ^ gatekey;
@@ -342,17 +352,23 @@ void _get_unique(uint8_t unique[], u64 gatekey, int nbytes)
       }
     }
     //Add the final layer
-    xor_bits(&unique + current_pos, runtime_entropy, sizeof(runtime_entropy), fourth_layer, chunk);
+    xor_bits(&unique + current_pos, runtime_entropy, keypool_size, fourth_layer, chunk);
+
+    //clean our entry point for the first layer.
+    xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
+    //Future calls to with this gatekey will have a different first layer
+    runtime_entropy[gatekey % POOL_SIZE] ^= mop;
 
     //Make sure the mop is clean
     //There is a small chance we'll reuse the same mop_index, so the value must change
-    xor_bits(runtime_entropy, &unique + current_pos, sizeof(runtime_entropy), mop_index, sizeof(mop));
-    
+    xor_bits(keypool, &unique + current_pos, keypool_size, mop_index, sizeof(mop));
+
     //Change our inital layer by 1 byte
     //If we need more blocks then keep rotating our first layer.
     first_layer += 8;
   }
 
+  //Cover our tracks
   first_layer = 0;
   second_layer = 0;
   third_layer = 0;
@@ -417,9 +433,11 @@ void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
   //We don't have a word for the number 2^52
   //We can make it an even less likely collision 
   // - by adding an additonal 128 bits of variablity.
-  xor_bits(uu_key, &gatekey, sizeof(gatekey), 0, nbytes);
-  xor_bits(uu_key, &anvil, sizeof(anvil), sizeof(gatekey), nbytes);
+  //xor_bits(uu_key, &gatekey, sizeof(gatekey), 0, nbytes);
+  //xor_bits(uu_key, &anvil, sizeof(anvil), sizeof(gatekey), nbytes);
 
+  _add_unique(uu_key, nbytes, gatekey, &gatekey, sizeof(gatekey));
+  _add_unique(uu_key, nbytes, gatekey, &anvil, sizeof(anvil));
   //Pull in layers of PRNG
   _get_unique(uu_key, gatekey, nbytes);
 
@@ -480,10 +498,13 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
  */
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
-    //Three "pools" that will be filled
+    //__latent_entropy is better than zeros - it will be filled in.
     uint8_t   key_accumulator[BLOCK_SIZE] __latent_entropy;
     uint8_t   iv_accumulator[BLOCK_SIZE] __latent_entropy;
     uint8_t   image_accumulator[BLOCK_SIZE] __latent_entropy;
+    uint8_t   hardned_key[BLOCK_SIZE] __latent_entropy;
+    uint8_t   hardend_iv[BLOCK_SIZE] __latent_entropy;
+    uint8_t   hardend_image[BLOCK_SIZE] __latent_entropy;    
     AesOfbContext   aesOfb;
     size_t amountLeft = nbytes;
     int chunk;
@@ -493,21 +514,30 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     //For key scheduling purposes, the entropy pool acts as a kind of twist table.
     //The pool is circular, so our starting point can be the last element in the array.
 
+    _unique_key(hardned_key, gatekey, BLOCK_SIZE);
+    _unique_key(hardend_iv, gatekey, BLOCK_SIZE);
+    _unique_key(hardend_image, gatekey, BLOCK_SIZE);
+
     //The key, IV and Image will tumble for as long as they need, and copy out PRNG to the user. 
     while( amountLeft > 0 )
     {
         chunk = __min(amountLeft, BLOCK_SIZE );
-        //rescheudle the key each round - it will be more difficult to guess
+        //Grab a new BLOCK_SIZE and XOR it with the previous state.
         _unique_key(key_accumulator, gatekey, BLOCK_SIZE);
         _unique_key(iv_accumulator, gatekey, BLOCK_SIZE);
         _unique_key(image_accumulator, gatekey, BLOCK_SIZE);
 
+        //Add this new round of entropy to our keys
+        _add_unique(hardned_key, BLOCK_SIZE, gatekey, key_accumulator, BLOCK_SIZE);
+        _add_unique(hardned_iv, BLOCK_SIZE, gatekey, iv_accumulator, BLOCK_SIZE);
+        _add_unique(hardned_image, BLOCK_SIZE, gatekey, image_accumulator, BLOCK_SIZE);
+
         //Generate one block of PRNG
-        AesOfbInitialiseWithKey(&aesOfb, key_accumulator, (BLOCK_SIZE/8), iv_accumulator );
+        AesOfbInitialiseWithKey(&aesOfb, hardned_key, (BLOCK_SIZE/8), hardned_iv );
         //Image encrypted in place.
-        AesOfbOutput(&aesOfb, image_accumulator, chunk);
+        AesOfbOutput(&aesOfb, hardned_image, chunk);
         //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
-        memcpy(__user_buf + (nbytes - amountLeft), image_accumulator, chunk);
+        memcpy(__user_buf + (nbytes - amountLeft), hardned_image, chunk);
         amountLeft -= chunk;
         //More work?
         if(amountLeft > 0)
@@ -519,7 +549,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
           //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
 
           //This is the resulting IV unused from AES-OFB, intened to be used in the next round:
-          xor_bits(iv_accumulator, aesOfb.CurrentCipherBlock, BLOCK_SIZE, 0, BLOCK_SIZE);
+          _add_unique(iv_accumulator, BLOCK_SIZE, gatekey, aesOfb.CurrentCipherBlock, BLOCK_SIZE);
         }
      }
     //Cover our tracks.
