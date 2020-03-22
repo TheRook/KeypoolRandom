@@ -2,9 +2,34 @@
 
 ## Motivation
 
+The goal is to improve interrupt handling performance while providing a high-quality NIST compliant /dev/random.  Removing complexity and strange edge cases from intrupput halding will improve things. In order to remove this lock we have to fix a broader pattern in how entropy is added and removed from the pool. 	
+
+credit_entropy_bits does it's job very well - however it is a heavy function and we would benefit form having it moved outside of handle_irq_event_percpu() (handle.c).  This should change makes every interrupt slightly faster, and avoids the possilbity of one itrrupt getting screwed over by being forced to re-schedule the entire entropy pool.
+
+differences betwen random and urandom
+
+random needs to be fast, and in the past it relies on using a cryptogrpahic primitive for expansion of PNRG to fill a given request.
+
+urandom on the other hand uses a cryptographic primitive to compact rather than expand, we want to make sure that more entorpy, and in turn more effort was generate more PNRG than what was needed and cryptographic operations compact down the desired size.  This is a good stratgey for constructing an unlimited rand, and this strategy was adopted for a keypool rand where we have more plentiful sources PRNG to compact down.
+
+
+Randomlly rescheudling the entorpy pool on a intrrupt is unfair to the user.  You are saying that some random syscall is less important then YOUR internal driver state?  What the fuck kind of device driver gets away with this? We already accept a penitly, and then it is randomlly worse?  And its entierly avoidable!
+
+This syscall pentitly unexceptable.  The rescheudling peneitly must be paid for by the caller who is reqesting PRNG!  Un-affiliated process should not be penlized for just existing.  What if that user land task was trading stock, and you just decided to rescheudle the pool randomllay?  Because fuck them right?  (Ok, I'm sure no one actually said this - but the code is telling a differnt story.)
+
+Fixing this one issue is worth fighting for, this is somthing that abosoutly needed to be addressed in my PR.
+
+
+measires:
+ - boot time
+ - number of locks taken out to boot linux
+ - time taken for each inturrpt
+ - power usage
+ - number of write operations to the pool
+
 Any improvement in the linux kernel's performance cloud have a dramatic effect on power usage worldwide.  If we can improve the efficiency of Linux’s random number generator by removing bottlenecks then our cell-phone battery will last longer, our electric cars will go further, our data centers will draw less electricity, and the technology we love will produce less CO2.   None of this should be done at sacrificing basic security needs or violating any NIST requirement.  We might be able to get more out of the existing entropy pool in the Linux Kernel using AES-OFB, this project is exploring what that looks like.
 
-## Goals
+## Features
  - Follow NIST security requirements.
  - Provide a high bar of security while being a sensibly-efficient source of random values 
  - Function-level security where all Inputs are untrusted
@@ -12,6 +37,8 @@ Any improvement in the linux kernel's performance cloud have a dramatic effect o
  - All outputs are AES cipher-text 
  - Don’t trust input from userspace or from hardware
  - No worse than the available hardware rand, and unaffected by any known-backdoors for hardware rand. 
+ - proactive security 
+
 
 ## Foreword
 
@@ -63,3 +90,10 @@ Entropy estimation estimation is essential.  Although it isn't perfect, any sour
  Time is heavily used in the random.c generation process - and adding more time when the pool is at it's weakest doesn't put my mind at ease. I don't like the name of try_to_generate_randomness(), and I don't like we need this method to fill a real need. As an alternate to try_to_generate_randomness() I wrote find_entropy_in_memory().  Both methods generate X needed bytes of entropy on demand without blocking - one uses entielry time, the other uses entierly memory.  It is uses memory address resolution as a kind of telescope into the depths of memory, looking for unallocated noise, and unique identifiers.
 
 
+
+You spoiled mother fucker.  You litterally hooked the most heavily trafficed call in all of Linux and you cannot manage to keep the pool full?  You are like a rich kid that litterally is given everything they could possibly need by their parrents, but you can't spend your money wisly to save your life, so you keep dead locking your account while every other device driver looks on with envy. Get the fuck out of here /dev/random your drunk. You are spending Google's money, my money and wasting everyone's battery life.  Get your shit together man.
+
+
+Sand has a number of great properties. Imaging just taking a picutre of sand close up, and turning it into a binary stream - that would be a difficult number to guess even if the attacker knows it is picture of sand.  This picutre of sand is so pretty good, you wouldn't need a very high resolution image - in fact maybe just 1024 bytes would be too large for anyone to guess.
+
+When you are pooring sand into a pile, there really isn't a bottle neck.  You can just dump more and the pile grows with the addition of new mateiral. The pile of sand isn't uniform, there are irregularites and someitmes the sand can avalanche off one side - and this is a useful property.  Our keypool is a bit like a mound of sand.  It is cirular, and entropy is added at a speicifc point, how it falls entropy falls into the pool is irregular and dependent on what has come before.

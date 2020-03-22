@@ -16,6 +16,7 @@
 /* These are for everybody (although not all archs will actually
    discard it in modules) */
 
+
 #ifndef jiffies
 #define jiffies		time(NULL)
 #endif
@@ -243,4 +244,6 @@ int arch_get_random_long(long *seed){
 static long random_get_entropy(){
 	return rand();
 }
+
+static struct crng_state primary_crng;
 
