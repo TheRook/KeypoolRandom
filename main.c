@@ -191,7 +191,7 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
     {
       read_index = 0;
     }
-    //Pick a random point to jump to
+    //Pick a random point to jump to - O(1)
     //Add in the gatekey so this jump path is distict
     next_jump = ((u64)keypool[anvil_addr] + gatekey) % keypool_size;
 
@@ -242,17 +242,20 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
   u64 mop __latent_entropy;
   //A distinct mop is a better mop
   mop ^= gatekey;
-
+  printf("_get_unique\n");
+  printf("nbytes:%i\n",nbytes);
+  //die();
   //We can't produce any more than POOL_SIZE bytes per position
   //Invocations should only use one interation of the loop,
   //But we can return more to be future-proof and protective.
-  for(int chunk = 0; nbytes >= 0; nbytes-=chunk)
+  for(int chunk = 0; nbytes > 0; nbytes-=chunk)
   {
-    
     //After POOL_SIZE bytes we need four new points
     chunk = __min(POOL_SIZE, nbytes);
     int current_pos = nbytes - chunk;
-
+    printf("chunk:%i\n",chunk);
+    printf("POOL_SIZE:%i\n",POOL_SIZE);
+    printf("nbytes:%i\n",nbytes);
     mop_index = mop % POOL_SIZE_BITS;
     //Establish an additional point for cleaning up our tracks
     //To clena the mop iwe XOR it with a good source of PRNG:
@@ -281,15 +284,15 @@ printf("-1\n");
     u16 first_mop = (u16)&mop+4;
 printf("0\n");
     //Cleanup our keyspace
-    xor_bits(&keypool, &first_mop, 2, first_layer, 2);
+    xor_bits(keypool, &first_mop, 2, first_layer, 2);
 printf("1, %i\n",current_pos);
     //Add the next layer
-    xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
+  //  xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
 printf("1.5\n");
-    xor_bits(keypool, &mop+2, 2, second_layer,2);
+   // xor_bits(keypool, &mop+2, 2, second_layer,2);
 printf("2\n");
     //clean our entry point for the first layer.
-    xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
+   // xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
     //Future calls to with this gatekey will have a different first layer
     runtime_entropy[gatekey % POOL_SIZE] ^= mop;
 printf("3\n");
@@ -309,7 +312,6 @@ printf("4\n");
   third_layer = 0;
   fourth_layer = 0;
   mop = 0;
-  nbytes = 0;
   gatekey = 0;
 }
 
@@ -363,10 +365,11 @@ u64 _alternate_rand()
   //anvil might still be zero - sure this could have been an unlucky roll
   // - but it also could be hardware letting us down, we can't tell the differnece.
   //The caller needs somthing
-  if(!anvil)
+  /*if(!anvil)
   {
-    anvil = get_random_u64();
+    _get_unique(primary_crng.state, POOL_SIZE, uu_key, gatekey, nbytes);
   }
+  */
   //Worst case, we are missing everything above
   if(!anvil)
   {
@@ -385,16 +388,18 @@ u64 _alternate_rand()
 */
 void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
 {
+  printf("before alt rand\n");
   u64 anvil = _alternate_rand();
-  
+  printf("_unique_key\n");
   //Pull in layers of PRNG to get a unique read
   _get_unique(primary_crng.state, POOL_SIZE, uu_key, gatekey, nbytes);
-
+  printf("after _get_unique\n");
   //Make sure our local state is distinct from any global state
   _add_unique(uu_key, nbytes, gatekey, &gatekey, sizeof(gatekey), sizeof(gatekey));
-  //make more unique, add immediate sources of unkowns
+  //make more unique, add a hardware source:
   _add_unique(uu_key, nbytes, gatekey, &anvil, sizeof(anvil), sizeof(anvil));
 
+  //clean and return
   gatekey = 0;
   anvil = 0;
 }
@@ -415,14 +420,14 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //If we only need a few bytes these two are the best source.
     if(nbytes <= 0){
       return nbytes;
-    }else if(nbytes <= 4){
-      u32 anvil = get_random_u32(); 
-      strncpy(__user_buf, anvil, nbytes);
-      anvil = 0;
-    }else if(nbytes <= 8){
-      u64 anvil = get_random_u64();
-      strncpy(__user_buf, anvil, nbytes);
-      anvil = 0;
+    }else if(nbytes < BLOCK_SIZE){
+      uint8_t    anvil[BLOCK_SIZE] __latent_entropy;
+      //Get upto one block of good CRNG:
+      _unique_key(anvil, __make_gatekey(anvil), nbytes);
+      //Copy into user space
+      memcpy(__user_buf, anvil, nbytes);
+      //cover our tracks
+      memzero_explicit(anvil, BLOCK_SIZE);
     }else{
       //Ok, we need somthing bigger, time for OFB.
       uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
@@ -467,7 +472,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
  */
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
-    //__latent_entropy is better than zeros - it will be filled in.
+    //__latent_entropy is better than zeros
     uint8_t   key_accumulator[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardned_key[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardend_iv[BLOCK_SIZE] __latent_entropy;
@@ -492,9 +497,9 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     while( amountLeft > 0 )
     {
         chunk = __min(amountLeft, BLOCK_SIZE );
+
         //Grab a new BLOCK_SIZE and XOR it with the previous state.
         _unique_key(key_accumulator, __make_gatekey(key_accumulator), BLOCK_SIZE);
-
         //Add this new round of entropy to our keys
         _add_unique(hardned_key, BLOCK_SIZE, __make_gatekey(hardned_key), key_accumulator, BLOCK_SIZE, BLOCK_SIZE);
 
@@ -554,7 +559,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   __u64     ip = _RET_IP_;
   unsigned long   seed ;
 
-  //Taken from random.c - all O(1) operations
+  //This code is adapted from the old random.c - all O(1) operations
   //The interrupt + time gives us 4 bytes.
   if (cycles == 0)
     cycles = get_reg(fast_pool, regs);
@@ -898,18 +903,20 @@ int
 
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
-    memset(local_block, 0, sizeof local_block); 
-    printf("start\n");
+    //memset(local_block, 0, sizeof local_block); 
+    u64 gatekey;
+
+    //gatekey = jiffies ^ (u64)&gatekey ^ (u64)&gatekey ^ (u64)_THIS_IP_;
+   // gatekey = __make_gatekey(&gatekey);
     u32 small = get_random_u32();
-    printf("u64:");
+    printf("small:%lu", small);
+    printf("\n\n"); 
+    //exit();
     u64 mid = get_random_u64();
-    printf("%lu", small);
-    printf("\n\n");
-    printf("%lu", mid);
+    printf("mid:%lu", mid);
     printf("%llu", mid);
     printf("\n\n");
-    u64 gatekey;
-    gatekey = __make_gatekey(&gatekey);
+
     printf("gatekey:%llu",gatekey);
     printf("\n\n");
     //lets fill a request
