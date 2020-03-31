@@ -129,13 +129,16 @@ void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset
       if(start_byte + k > source_len)
       {
          start_byte = 0;
+        //Protective - this won't happen
         if(k > source_len)
         {
-            //Should not happen.
             break;
         }
       }
+      printf("dest:%i\n",dest);
+      printf("predest:%i\n",k);
       *(dest + k) ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
+      printf("postdest:%i\n",k);
       if(k == byte_length-1)
       {
         //end the array with the bit position compliment
@@ -218,7 +221,7 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
  *  - making a total of 2^52 possible combinations for any given keypool.
  *
  * The gatekey and state of the keypool is used to derive 4 jump distinct points.
- * It is like taking 4 MRI scans of a sand castle, then putting them in a XOR killidiscope.
+ * It is like taking two MRI scans of a sand castle, then putting them in a XOR killidiscope.
  *
  * Constrants:
  *   Each of the four layers must be unique, to prevent a^a=0
@@ -237,11 +240,6 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
   u64 third_layer = 0;
   u64 fourth_layer = 0;
   int upper_bound = 0;
-  //A mop for cleanup
-  int mop_index = 0;
-  u64 mop __latent_entropy;
-  //A distinct mop is a better mop
-  mop ^= gatekey;
   printf("_get_unique\n");
   printf("nbytes:%i\n",nbytes);
   //die();
@@ -256,18 +254,13 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
     printf("chunk:%i\n",chunk);
     printf("POOL_SIZE:%i\n",POOL_SIZE);
     printf("nbytes:%i\n",nbytes);
-    mop_index = mop % POOL_SIZE_BITS;
-    //Establish an additional point for cleaning up our tracks
-    //To clena the mop iwe XOR it with a good source of PRNG:
-    xor_bits(&mop, keypool, keypool_size, mop_index, sizeof(mop));
-
     //Using this mop we clean up key points immeditaly after use.
 
     //We need a unique value from a global buffer
     //Use the mop to clean the state ahead of ths jump
     //We modify it, read it, then modify it
     //We want to maintain global uniqueness, local uniqueness, and secrecy.
-    runtime_entropy[first_layer % POOL_SIZE] ^= (u16)mop+6;
+    //runtime_entropy[first_layer % POOL_SIZE] ^= (u16)mop+6;
     second_layer = (u64)keypool[first_layer % POOL_SIZE];
     //Make our jump path locally unique
     second_layer ^= gatekey;
@@ -281,26 +274,19 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
 printf("-1\n");
     //Get our first layer in place
     xor_bits(unique + current_pos, keypool, keypool_size, first_layer, chunk);
-    u16 first_mop = (u16)&mop+4;
-printf("0\n");
-    //Cleanup our keyspace
-    xor_bits(keypool, &first_mop, 2, first_layer, 2);
 printf("1, %i\n",current_pos);
     //Add the next layer
-  //  xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
+    printf("section layer:%i\n",second_layer);
+    //xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
+    //xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
 printf("1.5\n");
-   // xor_bits(keypool, &mop+2, 2, second_layer,2);
-printf("2\n");
     //clean our entry point for the first layer.
-   // xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
+    //xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
     //Future calls to with this gatekey will have a different first layer
-    runtime_entropy[gatekey % POOL_SIZE] ^= mop;
+    //runtime_entropy[gatekey % POOL_SIZE] ^= mop;
+    //todo change our entry point:
+    ///xor_bits(keypool, keypool, keypool_size, second_layer, chunk);
 printf("3\n");
-    //Make sure the mop is clean
-    //There is a small chance we'll reuse the same mop_index, so the value must change
-    //As long as the value+index is unique - then the pool will remain distinct.
-    xor_bits(keypool, &unique + current_pos, keypool_size, mop_index, sizeof(mop));
-printf("4\n");
     //Change our inital layer by 1 byte
     //If we need more blocks then keep rotating our first layer.
     first_layer += 8;
@@ -311,7 +297,6 @@ printf("4\n");
   second_layer = 0;
   third_layer = 0;
   fourth_layer = 0;
-  mop = 0;
   gatekey = 0;
 }
 
@@ -339,7 +324,7 @@ u64 get_random_u64(void)
 u32 get_random_u32(void)
 {
   u32 anvil __latent_entropy;
-  _unique_key(&anvil, __make_gatekey(&anvil), sizeof(anvil));
+  _unique_key((u32 *)&anvil, __make_gatekey(&anvil), sizeof(anvil));
   return anvil;
 }
 
@@ -504,7 +489,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         _add_unique(hardned_key, BLOCK_SIZE, __make_gatekey(hardned_key), key_accumulator, BLOCK_SIZE, BLOCK_SIZE);
 
         //Generate one block of PRNG
-        AesOfbInitialiseWithKey(&aesOfb, hardned_key, (BLOCK_SIZE/8), hardend_iv );
+        AesOfbInitialiseWithKey(&aesOfb, hardned_key, (BLOCK_SIZE/8), hardend_iv);
         //Image countinly encrypted in place, the cyphertext rolls over so plaintext simularity is not a concern.
         AesOfbOutput(&aesOfb, hardend_image, chunk);
         //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
@@ -522,9 +507,10 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
           //The IV is a PRNG feedback as per the OFB spec - this is consistant
           //A new secret key is re-chosen each round, the new IV is used to choose the new key.
           //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
-
+           //Todo capture IV and use it.
+           AesOfbOutput(&aesOfb, hardend_iv, chunk);
           //This is the resulting IV unused from AES-OFB, intened to be used in the next round:
-          _add_unique(hardend_iv, BLOCK_SIZE, __make_gatekey(hardend_iv), aesOfb.CurrentCipherBlock, BLOCK_SIZE, BLOCK_SIZE);
+          //_add_unique(hardend_iv, BLOCK_SIZE, __make_gatekey(hardend_iv), aesOfb.CurrentCipherBlock, BLOCK_SIZE, BLOCK_SIZE);
         }
      }
     //Cover our tracks.
@@ -923,13 +909,13 @@ int
     //extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
-            printf("%1x", local_block[i]);
+        printf("%1x", local_block[i]);
     }
     printf("\n\n");
     extract_crng_user_unlimited(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
-            printf("%1x", local_block[i]);
+      printf("%1x", local_block[i]);
     }
     return 0;
 }
