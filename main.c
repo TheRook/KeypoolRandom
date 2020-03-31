@@ -119,33 +119,32 @@ int load_file(uint8_t dest[], int len)
 }
 
 //Copy by bit offset.
-void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, int bit_offset, int byte_length)
+void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, u64 bit_offset, u64 byte_length)
 {
-  int start_byte = bit_offset/32;        //The start byte to start the copy
-  int pos = bit_offset%32;      //The start bit within the first byte
+  //The start byte to start the copy
+  int start_byte = (bit_offset/32) % byte_length;
+  int pos = bit_offset%32;
+  //The start bit within the first byte
   for(int k = 0; k < byte_length; k++)
   {
-      //Treat the source as a circular buffer.          
-      if(start_byte + k > source_len)
+    //Treat the source as a circular buffer.          
+    if(start_byte + k > source_len)
+    {
+       start_byte = 0;
+      //Protective - this won't happen
+      if(k > source_len)
       {
-         start_byte = 0;
-        //Protective - this won't happen
-        if(k > source_len)
-        {
-            break;
-        }
+          break;
       }
-      printf("dest:%i\n",dest);
-      printf("predest:%i\n",k);
-      *(dest + k) ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
-      printf("postdest:%i\n",k);
-      if(k == byte_length-1)
-      {
-        //end the array with the bit position compliment
-        pos = 32 - (bit_offset%32);
-      }else{
-        pos = 0;
-      }
+    }
+    *(dest + k) ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
+    if(k == byte_length-1)
+    {
+      //end the array with the bit position compliment
+      pos = 32 - (bit_offset%32);
+    }else{
+      pos = 0;
+    }
   }
 }
 
@@ -229,7 +228,7 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
  *   To prevent future repeats of a jump path we overwite our jump index
  * 
  */
-void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gatekey, int nbytes)
+void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t unique[], int nbytes)
 {
   //The caller has the option of stacking PRNG
   //Lets use the keypool with a jump table -
@@ -240,8 +239,7 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
   u64 third_layer = 0;
   u64 fourth_layer = 0;
   int upper_bound = 0;
-  printf("_get_unique\n");
-  printf("nbytes:%i\n",nbytes);
+
   //die();
   //We can't produce any more than POOL_SIZE bytes per position
   //Invocations should only use one interation of the loop,
@@ -251,18 +249,10 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
     //After POOL_SIZE bytes we need four new points
     chunk = __min(POOL_SIZE, nbytes);
     int current_pos = nbytes - chunk;
-    printf("chunk:%i\n",chunk);
-    printf("POOL_SIZE:%i\n",POOL_SIZE);
-    printf("nbytes:%i\n",nbytes);
-    //Using this mop we clean up key points immeditaly after use.
 
     //We need a unique value from a global buffer
-    //Use the mop to clean the state ahead of ths jump
-    //We modify it, read it, then modify it
-    //We want to maintain global uniqueness, local uniqueness, and secrecy.
-    //runtime_entropy[first_layer % POOL_SIZE] ^= (u16)mop+6;
     second_layer = (u64)keypool[first_layer % POOL_SIZE];
-    //Make our jump path locally unique
+    //Make our jump path unique to this call:
     second_layer ^= gatekey;
     //If we choose the same point then we XOR the same values.
     //Fall to either side, don't prefer one side.
@@ -271,24 +261,17 @@ void _get_unique(uint8_t keypool[], int keypool_size, uint8_t unique[], u64 gate
       //flip a coin, move a layer
       first_layer += (second_layer % 2) ? 1 : -1;
     }
-printf("-1\n");
+
     //Get our first layer in place
     xor_bits(unique + current_pos, keypool, keypool_size, first_layer, chunk);
-printf("1, %i\n",current_pos);
-    //Add the next layer
-    printf("section layer:%i\n",second_layer);
-    //xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
-    //xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
-printf("1.5\n");
-    //clean our entry point for the first layer.
-    //xor_bits(&mop, keypool, keypool_size, unique, sizeof(mop));
-    //Future calls to with this gatekey will have a different first layer
-    //runtime_entropy[gatekey % POOL_SIZE] ^= mop;
-    //todo change our entry point:
-    ///xor_bits(keypool, keypool, keypool_size, second_layer, chunk);
-printf("3\n");
-    //Change our inital layer by 1 byte
-    //If we need more blocks then keep rotating our first layer.
+    //Add our random 2nd layer to make (noise ^ noise)
+    xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
+
+    //clean our entry point so this first and second layer can never be re-used.
+    //the first 64bits of unique are *removed* from the first layer of the keypool.
+    keypool[first_layer % POOL_SIZE] ^= (u64)unique;
+
+    //shift a u64 number of bits forward.
     first_layer += 8;
   }
 
@@ -373,12 +356,11 @@ u64 _alternate_rand()
 */
 void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
 {
-  printf("before alt rand\n");
   u64 anvil = _alternate_rand();
-  printf("_unique_key\n");
+
   //Pull in layers of PRNG to get a unique read
-  _get_unique(primary_crng.state, POOL_SIZE, uu_key, gatekey, nbytes);
-  printf("after _get_unique\n");
+  _get_unique(primary_crng.state, POOL_SIZE, gatekey, uu_key, nbytes);
+
   //Make sure our local state is distinct from any global state
   _add_unique(uu_key, nbytes, gatekey, &gatekey, sizeof(gatekey), sizeof(gatekey));
   //make more unique, add a hardware source:
@@ -408,7 +390,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     }else if(nbytes < BLOCK_SIZE){
       uint8_t    anvil[BLOCK_SIZE] __latent_entropy;
       //Get upto one block of good CRNG:
-      _unique_key(anvil, __make_gatekey(anvil), nbytes);
+      _unique_key(anvil, __make_gatekey(anvil), BLOCK_SIZE);
       //Copy into user space
       memcpy(__user_buf, anvil, nbytes);
       //cover our tracks
@@ -590,8 +572,8 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   } buf;
 
   // fetch an IV in the current state.
-  _unique_key(&local_iv, __make_gatekey(local_iv), BLOCK_SIZE);
-  _unique_key(&local_key, __make_gatekey(local_key), BLOCK_SIZE);
+  _unique_key(local_iv, __make_gatekey(local_iv), BLOCK_SIZE);
+  _unique_key(local_key, __make_gatekey(local_key), BLOCK_SIZE);
 
   //Output of extract_crng_user() will XOR with the current primary_crng.state
   extract_crng_user(primary_crng.state, sizeof(primary_crng.state));
@@ -890,7 +872,7 @@ int
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
     //memset(local_block, 0, sizeof local_block); 
-    u64 gatekey;
+    //u64 gatekey;
 
     //gatekey = jiffies ^ (u64)&gatekey ^ (u64)&gatekey ^ (u64)_THIS_IP_;
    // gatekey = __make_gatekey(&gatekey);
@@ -903,10 +885,10 @@ int
     printf("%llu", mid);
     printf("\n\n");
 
-    printf("gatekey:%llu",gatekey);
+    //printf("gatekey:%llu",gatekey);
     printf("\n\n");
     //lets fill a request
-    //extract_crng_user(local_block, BLOCK_SIZE*2);
+    extract_crng_user(local_block, BLOCK_SIZE*2);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
         printf("%1x", local_block[i]);
