@@ -1,5 +1,17 @@
 # Keypool Random
 
+Build insturcionts:
+
+Builds with GCC on any platform,  this is using scaffolding to build a local binary - it isn't linked with the mainline linux (yet).  It is just an experimental module that runs locally. 
+
+On OSX in order to use gcc you need to run:
+xcode-select --install
+
+On any system just run:
+./build.sh
+Then run the resulting binary:
+./keypool
+
 ## Motivation
 
 The goal is to improve interrupt handling performance while providing a high-quality NIST compliant /dev/random device driver. We can accomplish this by removing the need to hook the interrupt handler, which is used for all kinds of features - including reschedule the pool which will randomly penalize syscalls and really ought to be removed. In order to remove the /dev/random locks, we have to fix a broader pattern in how entropy is added and removed from the pool. 	
