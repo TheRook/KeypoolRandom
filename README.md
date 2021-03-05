@@ -1,16 +1,15 @@
 # Keypool Random
 
-Build insturcionts:
+- Build instructions:
 
 Builds with GCC on any platform,  this is using scaffolding to build a local binary - it isn't linked with the mainline linux (yet).  It is just an experimental module that runs locally. 
 
 On OSX in order to use gcc you need to run:
-xcode-select --install
+- xcode-select --install
 
 On any system just run:
-./build.sh
-Then run the resulting binary:
-./keypool
+- ./build.sh
+- ./keypool
 
 ## Motivation
 
