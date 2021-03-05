@@ -1,4 +1,5 @@
 # Keypool Random
+A faster lockless /dev/random proposal for embedded, battery powered devices, that applications that need more performance out of Linux.
 
 ## Build instructions:
 
