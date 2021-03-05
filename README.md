@@ -1,8 +1,8 @@
 # Keypool Random
 
-- Build instructions:
+## Build instructions:
 
-Builds with GCC on any platform,  this is using scaffolding to build a local binary - it isn't linked with the mainline linux (yet).  It is just an experimental module that runs locally. 
+Builds with GCC on any platform, this is using scaffolding to build a local binary - it isn't linked with the mainline linux (yet).  It is just an experimental module that runs locally to prove the theory and to discuss this design.
 
 On OSX in order to use gcc you need to run:
 - xcode-select --install
