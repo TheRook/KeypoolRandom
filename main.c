@@ -41,6 +41,7 @@ Notes:
 //  IMPORTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #include <stdio.h>
+// knockout.h is linux kernel scaffolding
 #include "knockout.h"
 #include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
 //#include "include/linux/types.h"
@@ -92,10 +93,6 @@ static struct entropy_store input_pool = {
   //#else
   //#define _gatekey(new_key)((u32)_RET_IP_ << 32 | ((u32)&new_key ^ (u32)_THIS_IP_))|((u32)_THIS_IP_ << 32 | (u32)&new_key);
   //#endif
-/*
-    anvil ^= ((u32)consumer_ip << 32 | ((u32)&origin_address ^ (u32)_THIS_IP_));
-    anvil ^= ((u32)&origin_address << 32 | (u32)&anvil);
-*/
 #endif
 
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
@@ -727,7 +724,10 @@ static void find_more_entropy_in_memory(struct crng_state *crng, int nbytes_need
   // - but it is unique enough as a seed.
   _unique_key(anvil, gatekey, nbytes_needed);
   _add_unique(crng, POOL_SIZE, gatekey, anvil, nbytes_needed, nbytes_needed);
-
+  
+  //Clean up our tracks so another process cannot see our source material
+  memset(anvil, 0, nbytes_needed);
+  gatekey = 0;
   free(anvil);
 }
 
