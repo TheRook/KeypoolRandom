@@ -13,6 +13,9 @@
 #endif
 */
 
+// Should be defined, points to the zero page populated by the bios
+#define ZERO_PAGE               "0123456789"
+
 /* These are for everybody (although not all archs will actually
    discard it in modules) */
 

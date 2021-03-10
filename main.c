@@ -64,8 +64,6 @@ Notes:
 #define BLOCK_SIZE_BITS         BLOCK_SIZE * 8
 #define POOL_SIZE               BLOCK_SIZE * 4
 #define POOL_SIZE_BITS          BLOCK_SIZE * 8
-
-#define ZERO_PAGE               0
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  FUNCTIONS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -637,7 +635,7 @@ static void find_more_entropy_in_memory(struct crng_state *crng, int nbytes_need
     _add_unique(crng, POOL_SIZE, gatekey, &readPoint, sizeof(readPoint), sizeof(readPoint));
     // Pull in uniqueness from this page in memory:
     // Todo - read the values at this address - we want the contents of the zero page:
-    // _add_unique(crng, POOL_SIZE, gatekey, readPoint, nbytes_needed, nbytes_needed);
+    //_add_unique(crng, POOL_SIZE, gatekey, readPoint, nbytes_needed, nbytes_needed);
   }
 
   //twigs when wrapped together can become loadbearing
