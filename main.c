@@ -232,7 +232,6 @@ void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
   //The caller has the option of stacking PRNG
   //Lets use the keypool with a jump table -
   //this jumptable pattern follows a similar pattern to the AES counterpart.
-  uint8_t anvil[POOL_SIZE] __latent_entropy;
   u64 first_layer = keypool[gatekey % keypool_size];
   u64 second_layer = 0;
   int upper_bound = 0;
@@ -504,46 +503,36 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 void add_interrupt_randomness(int irq, int irq_flags)
 {
   //Globally unique gatekey
-  uint64_t gatekey = __make_gatekey(&irq);
-  //Other itterupts are unlikely to choose our same entry_point
-  int entry_point = gatekey % (POOL_SIZE - 4);
-  u64  fast_pool[4];// = this_cpu_ptr(&irq_randomness);
+  uint64_t gatekey __latent_entropy;
+  u64  fast_pool[5];
   struct pt_regs    *regs = get_irq_regs();
-  unsigned long   now = jiffies;
   //irq_flags contains a few bits, and every bit counts.
   cycles_t    cycles = irq_flags;
   __u32     c_high, j_high;
   __u64     ip = _RET_IP_;
-  unsigned long   seed __latent_entropy;
 
   //This code is adapted from the old random.c - all O(1) operations
   //The interrupt + time gives us 4 bytes.
   if (cycles == 0)
     cycles = get_reg(fast_pool, regs);
   c_high = (sizeof(cycles) > 4) ? cycles >> 32 : 0;
-  j_high = (sizeof(now) > 4) ? now >> 32 : 0;
+  j_high = (sizeof(jiffies) > 4) ? jiffies >> 32 : 0;
   fast_pool[0] ^= cycles ^ j_high ^ irq;
-  fast_pool[1] ^= now ^ c_high;
+  fast_pool[1] ^= jiffies ^ c_high;
   fast_pool[2] ^= ip;
   fast_pool[3] ^= (sizeof(ip) > 4) ? ip >> 32 :
     get_reg(fast_pool, regs);
 
-  //fast_pool has captured all of the sources it can.
-  //Mixing fast_pool doesn't make it more unique...
-
-  //If we have a hardware rand, use it as a OTP, which will make it harder to guess.
-  //add_interrupt_randomness() only makes a single call to an outside random source
-  seed ^= _alternate_rand();
-  
-  //Seed is 64 bits, so lets squeeze ever bit out of that.
-  fast_pool[0] ^= seed;
-  fast_pool[1] ^= seed >> 32;
-  fast_pool[2] ^= gatekey;
-  fast_pool[3] ^= gatekey >> 32;
-
-  //_mix_pool_bytes() is great and all, but this is called a lot, we want somthing faster. 
+  // A gatekey will have some hardware randomness when available
+  // It will be XOR'ed with __latent_entropy to prevent outsider control
+  gatekey ^= __make_gatekey(&irq);
+  // Add this unique value to the pool
+  fast_pool[4] = gatekey;
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  _add_unique(primary_crng.state, POOL_SIZE, gatekey, fast_pool, 32, 32);
+  _add_unique(primary_crng.state, POOL_SIZE, gatekey, fast_pool, sizeof(fast_pool), sizeof(fast_pool));
+
+  //Cleanup
+  gatekey = 0;
 }
 
 static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
@@ -689,12 +678,15 @@ int
     //start empty
     memset(local_block, 0, sizeof local_block); 
 
+    //Simulated start of execution:
     //Assume this is the normal startup procedure from the kernel.
     load_file(runtime_entropy, POOL_SIZE);    
     find_more_entropy_in_memory(runtime_entropy, POOL_SIZE);
     //Start with noise in the pool for the jump table.
     //This will ensure that _unique_key() doesn't depend on __latent_entropy
     crng_reseed(runtime_entropy, runtime_entropy);
+    add_interrupt_randomness(1, 1);
+
 
     //u64 gatekey;
     u32 small = get_random_u32();
