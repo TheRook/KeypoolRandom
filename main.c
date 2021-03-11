@@ -81,21 +81,23 @@ static struct entropy_store input_pool = {
   .pool = input_pool_data
 };
 
+static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
+static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
+void _unique_key(u64 uu_key[], u64 gatekey, int nbytes);
+u64 _alternate_rand();
+
 
 //_THIS_IP_ must be called from a macro to make it distinct.
 //This process is ideal as a macro because _RET_IP_ and _THIS_IP_ will be more distinct
 //If -_gatekey() was a funciton then _THIS_IP_ will be the same every time.
 #ifndef __make_gatekey
-  #define __make_gatekey(new_key)((u64)jiffies ^ (u64)_RET_IP_ ^ (u64)new_key ^ (u64)_THIS_IP_)
+  #define __make_gatekey(new_key)((u64)jiffies ^ (u64)_RET_IP_ ^ (u64)new_key ^ (u64)_THIS_IP_ ^ _alternate_rand())
   //todo: 32bit
   //#else
   //#define _gatekey(new_key)((u32)_RET_IP_ << 32 | ((u32)&new_key ^ (u32)_THIS_IP_))|((u32)_THIS_IP_ << 32 | (u32)&new_key);
   //#endif
 #endif
 
-static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
-static void crng_reseed(struct crng_state *crng, struct entropy_store *r);
-void _unique_key(u64 uu_key[], u64 gatekey, int nbytes);
 
 int load_file(uint8_t dest[], int len)
 {
@@ -254,15 +256,17 @@ void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
       first_layer += (second_layer % 2) ? 1 : -1;
     }
 
-    //This is a kaleidoscope effect - with layers of prng:
+    //This is a kaleidoscope effect - with two layers of prng:
     //Get our first layer in place
     xor_bits(unique + current_pos, keypool, keypool_size, first_layer, chunk);
     //Add our random 2nd layer to make (noise ^ noise)
     xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
 
     //clean our entry point so this first and second layer can never be re-used.
-    //the first 64bits of unique are *removed* from the first layer of the keypool.
+    //This is where the value of 'uniqe' came from, so it is removed with a XOR:
     keypool[first_layer % POOL_SIZE] ^= (u64)unique;
+    //We add in 64bits that we removed by modifying the 2nd layer so it cannot be recovered.
+    keypool[second_layer % POOL_SIZE] ^= (u64)gatekey;
 
     //shift a u64 number of bits forward.
     first_layer += 8;
@@ -324,13 +328,14 @@ u64 _alternate_rand()
          anvil = random_get_entropy();
       }
   }
-  //anvil might still be zero - sure this could have been an unlucky roll
-  // - but it also could be hardware letting us down, we can't tell the differnece.
-  //Worst case, we are missing everything above
-  if(!anvil)
+  // anvil might still be zero -  
+  // We can't tell the differnece between a zero-roll and a hardware error code.
+  // Worst case, we are missing everything above
+  if(anvil == 0)
   {
-    //If this isn't populated we'll get a compiler error.
-    anvil = __make_gatekey(anvil);
+    // We cannot fail, in this case we pull from the pool
+    // This output is used to make a gatekey, so time is used
+    _unique_key(&anvil, (u64)jiffies, 8);
   }
   return anvil;
 }
@@ -345,8 +350,6 @@ u64 _alternate_rand()
 void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
 {
   u64 anvil __latent_entropy;
-  //_alternate_rand() isn't trusted, so we XOR it with a the __latent_entropy compile-time secret
-  anvil ^= _alternate_rand();
 
   //Pull in layers of PRNG to get a unique read
   _get_unique(primary_crng.state, POOL_SIZE, gatekey, uu_key, nbytes);
