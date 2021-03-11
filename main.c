@@ -113,11 +113,11 @@ int load_file(uint8_t dest[], int len)
 }
 
 //Copy by bit offset.
-void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, u64 bit_offset, u64 byte_length)
+void  xor_bits( uint8_t dest[], int dest_len, int dest_offset, uint8_t source[], int source_len, int src_offset, int byte_length)
 {
   //The start byte to start the copy
-  int start_byte = (bit_offset/32) % byte_length;
-  int pos = bit_offset%32;
+  int start_byte = (src_offset/32) % byte_length;
+  int bit_pos = src_offset%32;
   //The start bit within the first byte
   for(int k = 0; k < byte_length; k++)
   {
@@ -125,19 +125,23 @@ void  xor_bits( uint8_t dest[], uint8_t source[], int source_len, u64 bit_offset
     if(start_byte + k > source_len)
     {
        start_byte = 0;
-      //Protective - this won't happen
-      if(k > source_len)
-      {
-          break;
-      }
+       k = 0;
     }
-    *(dest + k) ^= (0xffffffff >> (32-(pos))) << source[start_byte+k];
+    if(dest_offset >= dest_len)
+    {
+      dest_offset = 0;
+    }
+    else
+    {
+      dest_offset++;
+    }
+    *(dest + dest_offset) ^= (0xffffffff >> (32-(bit_pos))) << source[start_byte+k];
     if(k == byte_length-1)
     {
       //end the array with the bit position compliment
-      pos = 32 - (bit_offset%32);
+      bit_pos = 32 - (src_offset%32);
     }else{
-      pos = 0;
+      bit_pos = 0;
     }
   }
 }
@@ -175,9 +179,8 @@ static void mix_pool_bytes(struct entropy_store *r, const void *in,
  */
 void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t unique[], int unique_size, int nbytes)
 {
-  u64 anvil_addr = gatekey % keypool_size;
-  u64 next_jump = 0;
   int read_index = 0;
+  int next_jump = gatekey;
   //Copy bytes with a jump table - O(n)
   for(int i = 0; i < nbytes;i++)
   {
@@ -187,17 +190,19 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
     {
       read_index = 0;
     }
+    // Save off the jump address before we change it. 
+    next_jump = keypool[gatekey % keypool_size];
+
+    // Add our byte to this reigion.
+    keypool[gatekey % keypool_size] ^= unique[read_index];
+
     //Pick a random point to jump to - O(1)
     //Add in the gatekey so this jump path is distict
-    next_jump = ((u64)keypool[anvil_addr] + gatekey) % keypool_size;
+    gatekey = next_jump + gatekey;
 
-    //With a strike of the anvil - a new byte has been added to the pool
-    keypool[anvil_addr] ^= unique[i];
-    //Find the next place to strike
-    anvil_addr = next_jump;
   }
+  gatekey = 0;
   next_jump = 0;
-  anvil_addr = 0;
 }
 
 /*
@@ -255,16 +260,16 @@ void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
 
     //This is a kaleidoscope effect - with two layers of prng:
     //Get our first layer in place
-    xor_bits(unique + current_pos, keypool, keypool_size, first_layer, chunk);
-    //Add our random 2nd layer to make (noise ^ noise)
-    xor_bits(unique + current_pos, keypool, keypool_size, second_layer, chunk);
-
+    xor_bits(unique, nbytes, current_pos, keypool, keypool_size, first_layer, chunk);
     //clean our entry point so this first and second layer can never be re-used.
-    //This is where the value of 'uniqe' came from, so it is removed with a XOR:
-    keypool[first_layer % POOL_SIZE] ^= (u64)unique;
-    //We add in 64bits that we removed by modifying the 2nd layer so it cannot be recovered.
-    keypool[second_layer % POOL_SIZE] ^= (u64)gatekey;
+    //This is where the value of 'uniqe' came from, so it is removed with a XOR:   
+    xor_bits(keypool, keypool_size, first_layer, unique, chunk, 0, chunk);
 
+    //Add our random 2nd layer to make (noise1 ^ noise2)
+    xor_bits(unique, nbytes, current_pos, keypool, keypool_size, second_layer, chunk);
+    //We add in 64bits that we removed by modifying the 2nd layer so it cannot be recovered.
+    //xor_bits(keypool, keypool_size, second_layer, &gatekey, sizeof(gatekey), 0, sizeof(gatekey));
+   
     //shift a u64 number of bits forward.
     first_layer += 8;
   }
@@ -344,19 +349,15 @@ u64 _alternate_rand()
 */
 void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
 {
-  u64 anvil __latent_entropy;
 
   //Pull in layers of PRNG to get a unique read
   _get_unique(primary_crng.state, POOL_SIZE, gatekey, uu_key, nbytes);
 
   //by adding uniqness from our local state we have yet another reason why the return value is distinct
   _add_unique(uu_key, nbytes, gatekey, &gatekey, sizeof(gatekey), sizeof(gatekey));
-  //make more unique, add a hardware source:
-  _add_unique(uu_key, nbytes, gatekey, &anvil, sizeof(anvil), sizeof(anvil));
 
   //clean and return
   gatekey = 0;
-  anvil = 0;
 }
 
 /*
