@@ -230,11 +230,8 @@ void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
   uint8_t anvil[POOL_SIZE] __latent_entropy;
   u64 first_layer = keypool[gatekey % keypool_size];
   u64 second_layer = 0;
-  u64 third_layer = 0;
-  u64 fourth_layer = 0;
   int upper_bound = 0;
 
-  //die();
   //We can't produce any more than POOL_SIZE bytes per position
   //Invocations should only use one interation of the loop,
   //But we can return more to be future-proof and protective.
@@ -275,8 +272,6 @@ void _get_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
   //Cover our tracks
   first_layer = 0;
   second_layer = 0;
-  third_layer = 0;
-  fourth_layer = 0;
   gatekey = 0;
 }
 
