@@ -153,7 +153,7 @@ void  xor_bits( uint8_t dest[], int dest_len, int dest_offset, uint8_t source[],
 static void mix_pool_bytes(struct entropy_store *r, const void *in,
          int nbytes)
 {
-  _mix_pool_bytes(r, in, nbytes);
+  //_mix_pool_bytes(r, in, nbytes);
 }
 
 /* Add uniqeness to the keypool

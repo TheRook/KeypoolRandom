@@ -125,11 +125,11 @@ typedef long long		s64;
 typedef u8  uint8_t;
 typedef u16 uint16_t;
 typedef u32 uint32_t;
-typedef u64 uint64_t;
+//typedef u64 uint64_t;
 typedef s8  int8_t;
 typedef s16 int16_t;
 typedef s32 int32_t;
-typedef s64 int64_t;
+//typedef s64 int64_t;
 
 typedef u64 __u64;
 typedef u32 __u32;
@@ -179,62 +179,6 @@ static __u32 const twist_table[8] = {
 	0xedb88320, 0xd6d6a3e8, 0x9b64c2b0, 0xa00ae278 };
 
 
-/*
- * This function adds bytes into the entropy "pool".  It does not
- * update the entropy estimate.  The caller should call
- * credit_entropy_bits if this is appropriate.
- *
- * The pool is stirred with a primitive polynomial of the appropriate
- * degree, and then twisted.  We twist by three bits at a time because
- * it's cheap to do so and helps slightly in the expected case where
- * the entropy is concentrated in the low-order bits.
- */
-static void _mix_pool_bytes(struct entropy_store *r, const void *in,
-			    int nbytes)
-{
-	unsigned long i, tap1, tap2, tap3, tap4, tap5;
-	int input_rotate;
-	int wordmask = r->poolinfo->poolwords - 1;
-	const char *bytes = in;
-	__u32 w;
-
-	tap1 = r->poolinfo->tap1;
-	tap2 = r->poolinfo->tap2;
-	tap3 = r->poolinfo->tap3;
-	tap4 = r->poolinfo->tap4;
-	tap5 = r->poolinfo->tap5;
-
-	input_rotate = r->input_rotate;
-	i = r->add_ptr;
-
-	/* mix one byte at a time to simplify size handling and churn faster */
-	while (nbytes--) {
-		w = rol32(*bytes++, input_rotate);
-		i = (i - 1) & wordmask;
-
-		/* XOR in the various taps */
-		w ^= r->pool[i];
-		w ^= r->pool[(i + tap1) & wordmask];
-		w ^= r->pool[(i + tap2) & wordmask];
-		w ^= r->pool[(i + tap3) & wordmask];
-		w ^= r->pool[(i + tap4) & wordmask];
-		w ^= r->pool[(i + tap5) & wordmask];
-
-		/* Mix the result back in with a twist */
-		r->pool[i] = (w >> 3) ^ twist_table[w & 7];
-
-		/*
-		 * Normally, we add 7 bits of rotation to the pool.
-		 * At the beginning of the pool, add an extra 7 bits
-		 * rotation, so that successive passes spread the
-		 * input bits across the pool evenly.
-		 */
-		input_rotate = (input_rotate + (i ? 7 : 14)) & 31;
-	}
-
-	r->input_rotate = input_rotate;
-	r->add_ptr = i;
-}
 
 int arch_get_random_seed_long(long *seed){
 	seed = rand();
