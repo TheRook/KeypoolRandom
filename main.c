@@ -380,7 +380,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       //Get upto one block of good CRNG:
       _unique_key(anvil, __make_gatekey(anvil), BLOCK_SIZE);
       //Copy into user space
-      memcpy(__user_buf, anvil, nbytes);
+      memcpy(&__user_buf, anvil, nbytes);
       //cover our tracks
       memzero_explicit(anvil, BLOCK_SIZE);
     }else{
