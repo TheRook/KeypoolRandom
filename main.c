@@ -135,7 +135,7 @@ void  xor_bits( uint8_t dest[], int dest_len, int dest_offset, uint8_t source[],
     {
       dest_offset++;
     }
-    *(dest + dest_offset) ^= (0xffffffff >> (32-(bit_pos))) << source[start_byte+k];
+    *(dest + dest_offset) ^= (int8_t)source[start_byte+k];
     if(k == byte_length-1)
     {
       //end the array with the bit position compliment
@@ -380,7 +380,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       //Get upto one block of good CRNG:
       _unique_key(anvil, __make_gatekey(anvil), BLOCK_SIZE);
       //Copy into user space
-      memcpy(&__user_buf, anvil, nbytes);
+      memcpy(__user_buf, anvil, nbytes);
       //cover our tracks
       memzero_explicit(anvil, BLOCK_SIZE);
     }else{
@@ -398,7 +398,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
       _unique_key(local_key, __make_gatekey(local_key), BLOCK_SIZE);
 
       //Generate one block of PRNG
-      AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv );
+      AesOfbInitialiseWithKey(&aesOfb, local_key, sizeof(local_key), local_iv);
 
       //Zero out memeory to prevent backtracking
       memzero_explicit(local_iv, sizeof(local_iv));
@@ -431,7 +431,9 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     uint8_t   key_accumulator[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardned_key[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardend_iv[BLOCK_SIZE] __latent_entropy;
+    uint8_t   canary1 = 0;
     uint8_t   hardend_image[BLOCK_SIZE] __latent_entropy;    
+    uint8_t   canary = 0;
     AesOfbContext   aesOfb;
     size_t amountLeft = nbytes;
     int chunk;
@@ -459,11 +461,14 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         _add_unique(hardned_key, BLOCK_SIZE, __make_gatekey(hardned_key), key_accumulator, BLOCK_SIZE, BLOCK_SIZE);
 
         //Generate one block of PRNG
-        AesOfbInitialiseWithKey(&aesOfb, hardned_key, (BLOCK_SIZE/8), hardend_iv);
+        AesOfbInitialiseWithKey(&aesOfb, hardned_key, sizeof(hardned_key), hardend_iv);
         //Image countinly encrypted in place, the cyphertext rolls over so plaintext simularity is not a concern.
-        AesOfbOutput(&aesOfb, hardend_image, chunk);
+        AesOfbOutput(&aesOfb, 
+        hardend_image, 
+        chunk);
         //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
-        memcpy(__user_buf + (nbytes - amountLeft), hardend_image, chunk);
+        memcpy(&__user_buf, hardend_image, chunk);
+        __user_buf += chunk;
         amountLeft -= chunk;
 
         //All previous used Key+IV pairs have affected the resulting hardend_image
@@ -485,6 +490,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
      }
     //Cover our tracks.
     memzero_explicit(key_accumulator, sizeof(key_accumulator));
+    canary += canary1;
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
@@ -541,7 +547,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   unsigned long flags;
   int crng_init;
   int   i, num;
-  u8         fresh_prng[POOL_SIZE];
+  uint8_t    fresh_prng[POOL_SIZE] __latent_entropy;
   uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
   uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
   union {
@@ -554,6 +560,7 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   _unique_key(local_key, __make_gatekey(local_key), BLOCK_SIZE);
 
   //Output of extract_crng_user() will XOR with the current primary_crng.state
+  printf("!!!563\n");
   extract_crng_user(primary_crng.state, sizeof(primary_crng.state));
   //encrypt the entire entropy pool with the new key:
   AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv);
@@ -561,14 +568,14 @@ static void crng_reseed(struct crng_state *crng, struct entropy_store *r)
   AesOfbOutput(&aesOfb, primary_crng.state, POOL_SIZE); 
 
   //We bathe in the purest PRNG
-  extract_crng_user_unlimited(fresh_prng, POOL_SIZE);
+  extract_crng_user_unlimited(&fresh_prng, POOL_SIZE);
 
   //Cleanup to prevent leakage of secrets:
   memzero_explicit(&buf, sizeof(buf));
   memzero_explicit(&local_iv, sizeof(local_iv));
   memzero_explicit(&local_key, sizeof(local_key));
-  memzero_explicit(fresh_prng, POOL_SIZE);
-  primary_crng.init_time = jiffies;
+  memzero_explicit(&fresh_prng, POOL_SIZE);
+  //primary_crng.init_time = jiffies;
 }
 
 /*
@@ -604,11 +611,11 @@ static void find_more_entropy_in_memory(struct crng_state *crng, int nbytes_need
   //16 addresses for 64-bit is ideal, 32 should use 32 addresses to make 1024 bits.
   //Todo: use a debugger to find the 32 hardest to guess addresses.
   void *points_of_interest[] = {
-      ZERO_PAGE,
-      _RET_IP_,
-      _THIS_IP_,
-      anvil,
-      gatekey
+      //ZERO_PAGE,
+      //_RET_IP_,
+      //_THIS_IP_,
+      //anvil,
+      //gatekey
   };
 
   //Gather Runtime Entropy
@@ -672,7 +679,7 @@ int
         char**          ArgV
     )
 {
-    uint8_t        local_block[BLOCK_SIZE*2];
+    uint8_t        local_block[BLOCK_SIZE];
 
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
@@ -701,13 +708,14 @@ int
     //printf("gatekey:%llu",gatekey);
     printf("\n\n");
     //lets fill a request
-    extract_crng_user(local_block, BLOCK_SIZE*2);
+    printf("711\n");
+    extract_crng_user(local_block, BLOCK_SIZE);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
         printf("%1x", local_block[i]);
     }
     printf("\n\n");
-    extract_crng_user_unlimited(local_block, BLOCK_SIZE*2);
+    extract_crng_user_unlimited(local_block, BLOCK_SIZE);
     for (int i = 0; i < BLOCK_SIZE*2; i++)
     {
       printf("%1x", local_block[i]);
