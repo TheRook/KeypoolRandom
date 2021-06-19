@@ -187,11 +187,16 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
   // Pull one byte at a time out of the ring function
   for(size_t step = 0; step < nbytes; step++)
   {
+    // Get our first jump location based on the gatekey
     next_jump ^= gate_position[step % sizeof(gatekey)];
+    // gatekey will be rescheduled so it won't be reused
+    unique[step] ^= gate_position[step % sizeof(gatekey)];   
     first_position = next_jump % keypool_size;
     // Add our first byte to this reigion.
     unique[step] ^= keypool[first_position];
+    // Calculate the 2nd layer's jump
     next_jump ^= keypool[first_position];
+    // Circular buffer
     second_position = next_jump % keypool_size;
     // We need a unique position to avoid xor'ing the same value
     if(first_position == second_position){
@@ -199,6 +204,8 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
     }
     // Grab a 2nd byte from somewhere in the ring
     unique[step] ^= keypool[second_position]; 
+    
+    // Reschedule the gatekey
     if(step % sizeof(gatekey) == 0){
       // Get a 3rd position to rotate our gatekey
       next_jump ^= keypool[second_position];
@@ -208,7 +215,7 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
     // Modify the byte at the first_position so it cannot be reused
     // Add additional entropy
     // unique[step] and next_jump are very unpredictable
-    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump;    
+    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump;   
   }
 
   //Cover our tracks
@@ -587,7 +594,7 @@ int
 {
     uint8_t        local_block[BLOCK_SIZE];
     uint8_t        large_block[BLOCK_SIZE*1000];
-
+    FILE *out_test;
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
     memset(local_block, 0, sizeof(local_block)); 
@@ -624,10 +631,8 @@ int
     printf("\n\n");
     extract_crng_user(large_block, BLOCK_SIZE*10);
     
-    for (int i = 0; i < BLOCK_SIZE*10; i++)
-    {
-      printf("%1x", large_block[i]);
-    }
-    printf("\n\n");
+    out_test = fopen("output.bin","wb");
+    fwrite(large_block,BLOCK_SIZE*10,1,out_test);
+    printf("wrote to output.bin\n\n");
     return 0;
 }
