@@ -43,9 +43,7 @@ Notes:
 #include <stdio.h>
 // knockout.h is linux kernel scaffolding
 #include "knockout.h"
-#include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
-//#include "include/linux/types.h"
-//#include "include/linux/compiler_attributes.h"
+//#include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  DEFINITIONS
@@ -77,7 +75,7 @@ static __u32 blocking_pool_data[OUTPUT_POOL_WORDS] __latent_entropy;
 
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
 static void crng_reseed(uint8_t *crng_pool, size_t nbytes);
-void _unique_key(u64 uu_key[], u64 gatekey, int nbytes);
+void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes);
 u64 _alternate_rand();
 
 
@@ -104,52 +102,6 @@ int load_file(uint8_t *dest, size_t len)
      ret = 1;
   }
   return ret;
-}
-
-//Copy by bit offset.
-void  xor_bits( uint8_t dest[], int dest_len, int dest_offset, uint8_t source[], int source_len, int src_offset, int byte_length)
-{
-  //The start byte to start the copy
-  int start_byte = (src_offset/32) % byte_length;
-  int bit_pos = src_offset%32;
-  // Make sure the offset is within the range
-  dest_offset = dest_offset % dest_len;
-  //The start bit within the first byte
-  for(int k = 0; k < byte_length; k++)
-  {
-    //Treat the source as a circular buffer.          
-    if(start_byte + k > source_len)
-    {
-       start_byte = 0;
-       k = 0;
-    }
-    if(dest_offset >= dest_len)
-    {
-      dest_offset = 0;
-    }
-    else
-    {
-      dest_offset++;
-    }
-    dest[dest_offset] ^= (int8_t)source[start_byte+k];
-    if(k == byte_length-1)
-    {
-      //end the array with the bit position compliment
-      bit_pos = 32 - (src_offset%32);
-    }else{
-      bit_pos = 0;
-    }
-  }
-}
-
-// This only removes locking from the existing mix_pool_bytes() - we want a race conditions
-// The underlying mix_pool_bytes is awesome, but the locks around it are not needed with a keypool.
-// This one change removes locks from add_timer_randomness, add_input_randomness, add_disk_randomness, and add_interrupt_randomness
-// add_timer_randomness add_input_randomness add_disk_randomness are fine becuase they do not contain locks.
-static void mix_pool_bytes(uint8_t *r, const void *in,
-         int nbytes)
-{
-  //_mix_pool_bytes(r, in, nbytes);
 }
 
 /* Add uniqeness to the keypool
@@ -223,20 +175,16 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
  *   To prevent future repeats of a jump path we overwite our jump index
  * 
  */
-void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *unique, int nbytes)
+void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *unique, size_t nbytes)
 {
-  //The caller has the option of stacking PRNG
-  //Lets use the keypool with a jump table -
-  //this jumptable pattern follows a similar pattern to the AES counterpart.
   u64  next_jump __latent_entropy;
   size_t first_position;
   size_t second_position;
-  //Each indivividual byte is used in the gatekey
+  // Each indivividual byte is used in the gatekey
   uint8_t *gate_position = (uint8_t *) &gatekey;
+  uint64_t *jump_rotate = (uint64_t *) &keypool;
 
-  //We can't produce any more than POOL_SIZE bytes per position
-  //Invocations should only use one interation of the loop,
-  //But we can return more to be future-proof and protective.
+  // Pull one byte at a time out of the ring function
   for(size_t step = 0; step < nbytes; step++)
   {
     next_jump ^= gate_position[step % sizeof(gatekey)];
@@ -245,14 +193,22 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
     unique[step] ^= keypool[first_position];
     next_jump ^= keypool[first_position];
     second_position = next_jump % keypool_size;
+    // We need a unique position to avoid xor'ing the same value
     if(first_position == second_position){
-      second_position = (second_position-1) % keypool_size;
+      second_position = (second_position + 1) % keypool_size;
     }
     // Grab a 2nd byte from somewhere in the ring
-    unique[step] ^= keypool[second_position];
+    unique[step] ^= keypool[second_position]; 
+    if(step % sizeof(gatekey) == 0){
+      // Get a 3rd position to rotate our gatekey
+      next_jump ^= keypool[second_position];
+      // Make sure this gatekey is unique
+      gatekey ^= jump_rotate[next_jump % (keypool_size/4)] ^ next_jump;
+    }
     // Modify the byte at the first_position so it cannot be reused
     // Add additional entropy
-    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump; 
+    // unique[step] and next_jump are very unpredictable
+    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump;    
   }
 
   //Cover our tracks
@@ -337,7 +293,7 @@ u64 _alternate_rand()
  * The addition of identifing information (gatekey) and timestamp 
  * - is taken from UUID4 creation to ensure universal unquness.
 */
-void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
+void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
 {
 
   //Pull in layers of PRNG to get a unique read
@@ -363,40 +319,21 @@ void _unique_key(u64 uu_key[], u64 gatekey, int nbytes)
  */
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
     //Ok, we need somthing bigger, time for OFB.
-    uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
-    uint8_t    local_key[BLOCK_SIZE] __latent_entropy;    
     uint8_t    anvil[BLOCK_SIZE] __latent_entropy;
-    //get_random_u32() and get_random_u64() are faster
+    
     //If we only need a few bytes these two are the best source.
     if(nbytes <= 0){
       return nbytes;
-    }else if(nbytes < BLOCK_SIZE){
+    } if(nbytes <= BLOCK_SIZE){
       //Get upto one block of good CRNG:
       _unique_key(anvil, __make_gatekey(anvil), BLOCK_SIZE);
       //Copy into user space
       memcpy(__user_buf, anvil, nbytes);
-      //cover our tracks
-      memzero_explicit(anvil, BLOCK_SIZE);
     }else{
-      AesOfbContext   aesOfb; 
-      //size_t amountLeft = nbytes;
-      //For key scheduling purposes, the entropy pool acts as a kind of twist table.
-      //The pool is circular, so our starting point can be the last element in the array. 
-      _unique_key(local_iv, __make_gatekey(local_iv), BLOCK_SIZE);
-
-      //Select the key:
-      _unique_key(local_key, __make_gatekey(local_key), BLOCK_SIZE);
-
-      //Generate one block of PRNG
-      //AesOfbInitialiseWithKey(&aesOfb, local_key, sizeof(local_key), local_iv);
-
-      //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-      //AesOfbOutput(&aesOfb, __user_buf, nbytes);
-      //Zero out memeory to prevent backtracking
-      memzero_explicit(local_iv, sizeof(local_iv));
-      memzero_explicit(local_key, sizeof(local_iv));    
+      _unique_key(__user_buf, __make_gatekey(anvil), nbytes);
     }
-    //Cleanup complete   
+    //cover our tracks
+    memzero_explicit(anvil, BLOCK_SIZE);       
     //at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
@@ -414,6 +351,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
  * Key, IV, and Image accumulate entropy with each operation
  * They are never overwritten, only XOR'ed with the previous value
  */
+/*
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
     //__latent_entropy is better than zeros
@@ -452,7 +390,6 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         //Generate one block of PRNG
         AesOfbInitialiseWithKey(&aesOfb, hardned_key, sizeof(hardned_key), hardend_iv);
         //Image countinly encrypted in place, the cyphertext rolls over so plaintext simularity is not a concern.
-        printf("!!!!SIZE:%i\n",chunk);
         AesOfbOutput(&aesOfb, 
         hardend_image, 
         chunk);
@@ -483,7 +420,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
-
+*/
 
 /* This function is in fact called more times than I have ever used a phone.
  * lets keep this funciton as light as possilbe, and move more weight to extract_crng_user()
@@ -532,41 +469,24 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
 static void crng_reseed(uint8_t *crng_pool, size_t nbytes)
 {
-  AesOfbContext   aesOfb; 
-  unsigned long flags;
-  int crng_init;
-  int   i, num;
-  //uint8_t    fresh_prng[POOL_SIZE] __latent_entropy;
-  uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
-  uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
-  union {
-    __u8  block[BLOCK_SIZE];
-    __u32 key[8];
-  } buf;
+  uint64_t gatekey __latent_entropy;
+  gatekey ^= __make_gatekey(&gatekey);
+  uint8_t    streached_prng[POOL_SIZE] __latent_entropy;
 
-  // fetch an IV in the current state.
-  _unique_key(local_iv, __make_gatekey(&local_iv), BLOCK_SIZE);
-  _unique_key(local_key, __make_gatekey(&local_key), BLOCK_SIZE);
+  // Get a contianer of noise
+  _unique_key(streached_prng, gatekey, POOL_SIZE);
 
-  //Output of extract_crng_user() will XOR with the current crng_pool
-  printf("!!!565\n");
-  printf("nbytes:%i\n", nbytes);
+  // Output of extract_crng_user() will XOR with the current crng_pool
+  // re-seed with the current output, deleting the old state
   extract_crng_user(crng_pool, nbytes);
-  printf("!!!567\n");
-  //encrypt the entire entropy pool with the new key:
-  AesOfbInitialiseWithKey(&aesOfb, local_key, (BLOCK_SIZE/8), local_iv);
-  //Hardware accelerated AES-OFB will fill this request quickly and cannot fail.
-  AesOfbOutput(&aesOfb, crng_pool, nbytes); 
-  printf("567");
-  //We bathe in the purest PRNG
-  //extract_crng_user_unlimited(crng_pool, nbytes);
 
-  //Cleanup to prevent leakage of secrets:
-  memzero_explicit(&buf, sizeof(buf));
-  memzero_explicit(&local_iv, sizeof(local_iv));
-  memzero_explicit(&local_key, sizeof(local_key));
-  //memzero_explicit(&fresh_prng, POOL_SIZE);
-  //crng_pool.init_time = jiffies;
+  // Add the noise obtained from a pool that no longer exists
+  // Each byte is written using a jump table so its position is unkown
+  _add_unique(crng_pool, POOL_SIZE, gatekey, streached_prng, POOL_SIZE, POOL_SIZE);
+  
+  //cleanup
+  gatekey = 0;
+  memzero_explicit(&streached_prng, POOL_SIZE);
 }
 
 /*
@@ -583,14 +503,9 @@ static void crng_reseed(uint8_t *crng_pool, size_t nbytes)
  */
 static void find_more_entropy_in_memory(uint8_t *crng_pool, int nbytes_needed)
 {
-  AesOfbContext   aesOfb;
-  //Even if the entropy pool is all zeros - 
-  //latent_entropy will give us somthing, which is the point of the plugin.
-  uint8_t    local_iv[BLOCK_SIZE] __latent_entropy;
-  uint8_t    local_key[BLOCK_SIZE] __latent_entropy;
   uint8_t    *anvil;
-  u64        gatekey;
-  gatekey  = __make_gatekey(&anvil);
+  u64        gatekey __latent_entropy;
+  gatekey  ^= __make_gatekey(&anvil);
 
   //a place to forge some entrpy
   anvil = (uint8_t *)malloc(nbytes_needed);
@@ -655,7 +570,7 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
-  return extract_crng_user_unlimited(buf, nbytes);
+  return extract_crng_user(buf, nbytes);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -671,6 +586,7 @@ int
     )
 {
     uint8_t        local_block[BLOCK_SIZE];
+    uint8_t        large_block[BLOCK_SIZE*1000];
 
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
@@ -678,12 +594,12 @@ int
 
     //Simulated start of execution:
     //Assume this is the normal startup procedure from the kernel.
-    //load_file(runtime_entropy, POOL_SIZE);    
+    load_file(runtime_entropy, POOL_SIZE);    
     //find_more_entropy_in_memory(runtime_entropy, POOL_SIZE);
     //Start with noise in the pool for the jump table.
     //This will ensure that _unique_key() doesn't depend on __latent_entropy
     //todo:
-    //crng_reseed(runtime_entropy, sizeof(runtime_entropy));
+    crng_reseed(runtime_entropy, sizeof(runtime_entropy));
     add_interrupt_randomness(1, 1);
 
 
@@ -697,20 +613,21 @@ int
     printf("%llu", mid);
     printf("\n\n");
 
-    //printf("gatekey:%llu",gatekey);
     printf("\n\n");
     //lets fill a request
     printf("705\n");
     extract_crng_user(local_block, BLOCK_SIZE);
-    for (int i = 0; i < BLOCK_SIZE*2; i++)
+    for (int i = 0; i < BLOCK_SIZE; i++)
     {
         printf("%1x", local_block[i]);
     }
     printf("\n\n");
-    //extract_crng_user_unlimited(local_block, BLOCK_SIZE);
-    for (int i = 0; i < BLOCK_SIZE*2; i++)
+    extract_crng_user(large_block, BLOCK_SIZE*10);
+    
+    for (int i = 0; i < BLOCK_SIZE*10; i++)
     {
-      printf("%1x", local_block[i]);
+      printf("%1x", large_block[i]);
     }
+    printf("\n\n");
     return 0;
 }
