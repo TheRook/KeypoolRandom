@@ -178,7 +178,7 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
   int read_index = 0;
   int next_jump = gatekey;
   //Copy bytes with a jump table - O(n)
-  for(int i = 0; i < nbytes;i++)
+  for(int step = 0; step < nbytes; step++)
   {
     //Make our read source circular
     read_index++;
@@ -228,51 +228,37 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
   //The caller has the option of stacking PRNG
   //Lets use the keypool with a jump table -
   //this jumptable pattern follows a similar pattern to the AES counterpart.
-  u64 first_layer = keypool[gatekey % keypool_size];
-  u64 second_layer = 0;
-  int upper_bound = 0;
+  u64  next_jump __latent_entropy;
+  size_t first_position;
+  size_t second_position;
+  //Each indivividual byte is used in the gatekey
+  uint8_t *gate_position = (uint8_t *) &gatekey;
 
   //We can't produce any more than POOL_SIZE bytes per position
   //Invocations should only use one interation of the loop,
   //But we can return more to be future-proof and protective.
-  for(size_t chunk = 0; nbytes > 0; nbytes-=chunk)
+  for(size_t step = 0; step < nbytes; step++)
   {
-    //After POOL_SIZE bytes we need four new points
-    chunk = __min(POOL_SIZE, nbytes);
-    chunk = __min(chunk, nbytes);
-    int current_pos = nbytes - chunk;
-
-    //We need a unique value from a global buffer
-    second_layer = (u64)keypool[first_layer % POOL_SIZE];
-    //Make our jump path unique to this call:
-    second_layer ^= gatekey;
-    //If we choose the same point then we XOR the same values.
-    //Fall to either side, don't prefer one side.
-    if((first_layer % POOL_SIZE_BITS) == (second_layer % POOL_SIZE_BITS))
-    {
-      //flip a coin, move a layer
-      first_layer += (second_layer % 2) ? 1 : -1;
+    next_jump ^= gate_position[step % sizeof(gatekey)];
+    first_position = next_jump % keypool_size;
+    // Add our first byte to this reigion.
+    unique[step] ^= keypool[first_position];
+    next_jump ^= keypool[first_position];
+    second_position = next_jump % keypool_size;
+    if(first_position == second_position){
+      second_position = (second_position-1) % keypool_size;
     }
-
-    //This is a kaleidoscope effect - with two layers of prng:
-    //Get our first layer in place
-    xor_bits(unique, nbytes, current_pos, keypool, keypool_size, first_layer, chunk);
-    //clean our entry point so this first and second layer can never be re-used.
-    //This is where the value of 'uniqe' came from, so it is removed with a XOR:   
-    xor_bits(keypool, keypool_size, first_layer, unique, chunk, 0, chunk);
-
-    //Add our random 2nd layer to make (noise1 ^ noise2)
-    xor_bits(unique, nbytes, current_pos, keypool, keypool_size, second_layer, chunk);
-    //We add in 64bits that we removed by modifying the 2nd layer so it cannot be recovered.
-    xor_bits(keypool, keypool_size, second_layer, &gatekey, sizeof(gatekey), 0, sizeof(gatekey));
-   
-    //shift a u64 number of bits forward.
-    first_layer += 8;
+    // Grab a 2nd byte from somewhere in the ring
+    unique[step] ^= keypool[second_position];
+    // Modify the byte at the first_position so it cannot be reused
+    // Add additional entropy
+    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump; 
   }
 
   //Cover our tracks
-  first_layer = 0;
-  second_layer = 0;
+  next_jump = 0;
+  first_position = 0;
+  second_position = 0;
   gatekey = 0;
 }
 
