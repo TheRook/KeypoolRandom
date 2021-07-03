@@ -42,34 +42,26 @@ Notes:
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 #include <stdio.h>
 // knockout.h is linux kernel scaffolding
+#include "aes.h"
 #include "knockout.h"
-//#include "WjCryptLib/lib/WjCryptLib_AesOfb.h"
-
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//  DEFINITIONS
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#ifndef __min
-   #define __min( x, y )  (((x) < (y))?(x):(y))
-#endif
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  CONSTANTS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-#define BUFFER_SIZE             1024
+#define KEYPOOL_SIZE             1024
 #define BLOCK_SIZE              256
 #define BLOCK_SIZE_BITS         BLOCK_SIZE * 8
 #define POOL_SIZE               BLOCK_SIZE * 4
 #define POOL_SIZE_BITS          BLOCK_SIZE * 8
+
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //  FUNCTIONS
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //Global runtime entropy
 uint8_t runtime_entropy[POOL_SIZE] __latent_entropy;
-uint8_t crng_pool[POOL_SIZE] __latent_entropy;
-
 static __u32 input_pool_data[INPUT_POOL_WORDS] __latent_entropy;
 static __u32 blocking_pool_data[OUTPUT_POOL_WORDS] __latent_entropy;
 
@@ -90,6 +82,11 @@ u64 _alternate_rand();
   //#endif
 #endif
 
+
+uint64_t rotl64 ( uint64_t x, int8_t r )
+{
+  return (x << r) | (x >> (64 - r));
+}
 
 int load_file(uint8_t *dest, size_t len)
 {
@@ -127,28 +124,19 @@ int load_file(uint8_t *dest, size_t len)
  */
 void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t unique[], int unique_size, int nbytes)
 {
-  int read_index = 0;
-  int next_jump = gatekey;
+  // Write in the first byte that is read by _get_unique() which is in 64 bits.
+  int next_jump = (gatekey * 8) % (keypool_size / 8);
   //Copy bytes with a jump table - O(n)
   for(int step = 0; step < nbytes; step++)
   {
-    //Make our read source circular
-    read_index++;
-    if(read_index > unique_size)
-    {
-      read_index = 0;
-    }
+    // Every byte within keypool_size can be written to at the same time without loosing a write.
+    keypool[next_jump] ^= unique[step];
     // Save off the jump address before we change it. 
-    next_jump = keypool[gatekey % keypool_size];
-
-    // Add our byte to this reigion.
-    keypool[gatekey % keypool_size] ^= unique[read_index];
-
-    //Pick a random point to jump to - O(1)
-    //Add in the gatekey so this jump path is distict
-    gatekey = next_jump + gatekey;
-
+    next_jump ^= keypool[next_jump];
+    // Circular buffer
+    next_jump = keypool_size % keypool_size;
   }
+  //Leave no trace
   gatekey = 0;
   next_jump = 0;
 }
@@ -177,51 +165,87 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
  */
 void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *unique, size_t nbytes)
 {
-  u64  next_jump __latent_entropy;
-  size_t first_position;
-  size_t second_position;
-  // Each indivividual byte is used in the gatekey
-  uint8_t *gate_position = (uint8_t *) &gatekey;
-  uint64_t *jump_rotate = (uint64_t *) &keypool;
+  uint64_t *keyspace = (uint64_t *) &keypool;
+  uint64_t *product = (uint64_t *) &unique;
+  int64_t keypool_size_64 = keypool_size / 8;
+  uint8_t gate_position = (uint8_t) gatekey % keypool_size_64;
+  uint64_t  curr_jump __latent_entropy;
+  uint8_t  jump_offset;
+  // We need to seed the process with our first jump location
+  product[0] ^= gatekey;
+  // A prime is used to maximize the number of reads without repeat
+  jump_offset = keypool_primes[product[1] % sizeof(keypool_primes)];
 
-  // Pull one byte at a time out of the ring function
-  for(size_t step = 0; step < nbytes; step++)
+  // Pull 64bits at a time out of the ring function
+  for(size_t step = 0; step < nbytes/8; step++)
   {
-    // Get our first jump location based on the gatekey
-    next_jump ^= gate_position[step % sizeof(gatekey)];
-    // gatekey will be rescheduled so it won't be reused
-    unique[step] ^= gate_position[step % sizeof(gatekey)];   
-    first_position = next_jump % keypool_size;
-    // Add our first byte to this reigion.
-    unique[step] ^= keypool[first_position];
-    // Calculate the 2nd layer's jump
-    next_jump ^= keypool[first_position];
-    // Circular buffer
-    second_position = next_jump % keypool_size;
-    // We need a unique position to avoid xor'ing the same value
-    if(first_position == second_position){
-      second_position = (second_position + 1) % keypool_size;
-    }
-    // Grab a 2nd byte from somewhere in the ring
-    unique[step] ^= keypool[second_position]; 
-    
-    // Reschedule the gatekey
-    if(step % sizeof(gatekey) == 0){
-      // Get a 3rd position to rotate our gatekey
-      next_jump ^= keypool[second_position];
-      // Make sure this gatekey is unique
-      gatekey ^= jump_rotate[next_jump % (keypool_size/4)] ^ next_jump;
-    }
-    // Modify the byte at the first_position so it cannot be reused
-    // Add additional entropy
-    // unique[step] and next_jump are very unpredictable
-    keypool[first_position] ^= unique[step] ^ (uint8_t)next_jump;   
+    // Pull the next 64bits from the entropy source:
+    product[step] ^= keyspace[gate_position];
+    // A shift rotate will make our reads less predictable without loosing entropy
+    // Here we rotate by an uncertin degree, making our local state more unique
+    product[step] = rotl64(product[step], unique[step]%64);    
+    // Pick another 64bit chunk that is somewhere else in the pool and doesn't overlap
+    gate_position = (gate_position + jump_offset) % keypool_size_64;
+    product[step] ^= keyspace[gate_position];
+    // Assume that 'keyspace' is shared, so we add a local rotation
+    product[step] = rotl64(product[step], unique[step+1]%64);
+    // Find another point to read from that is distinct.
+    gate_position = (gate_position + jump_offset) % keypool_size_64;
+  }
+}
+
+
+/*
+ * The goal of _unique_key is to return universally-unique key materials
+ * that an attacker cannot guess. 
+ * 
+ * The addition of identifing information (gatekey) and timestamp 
+ * - is taken from UUID4 creation to ensure universal unquness.
+*/
+void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
+{
+  struct AES_ctx ctx;
+  uint8_t aes_key_material[BLOCK_SIZE * 3] __latent_entropy;
+  uint8_t *aes_key = aes_key_material;
+  uint8_t *aes_iv = aes_key_material + BLOCK_SIZE;
+  uint8_t *aes_block = aes_key_material + BLOCK_SIZE * 2;
+  uint64_t *aes_block_rotate = (uint64_t *)aes_block;
+  _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, aes_key_material, sizeof(aes_key_material));
+  uint8_t *gate_position = (uint8_t *) &gatekey;
+  uint64_t *jump_rotate = (uint64_t *) &runtime_entropy;
+  size_t jump_rotate_size = KEYPOOL_SIZE / 8;
+  uint64_t first_offset = 0;
+  uint64_t curr_jump __latent_entropy;
+  first_offset = keypool_primes[gate_position[7] % sizeof(keypool_primes)];
+  // Pull 64bits at a time out of the ring function
+  for(size_t step = 0; step < nbytes; step+=8)
+  {
+    // Pull the next 64bits from the entropy source:
+    //curr_jump ^= jump_rotate[gate_position % jump_rotate_size];
+    _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, &curr_jump, sizeof(curr_jump));
+  
+    // Add uncertity - rotate what we get out of the entropy pool
+    curr_jump = rotl64(curr_jump, aes_block[step % BLOCK_SIZE] % 64);
+    // Make the key less predictable
+    _add_unique(aes_key_material,BLOCK_SIZE*3,gatekey,&curr_jump,sizeof(curr_jump),sizeof(curr_jump));
+    // Populate our cipher struct
+    AES_init_ctx_iv(&ctx, aes_key, aes_iv);
+    // Encrypt one block with AES-CBC-128:
+    AES_CBC_encrypt_buffer(&ctx, aes_block, BLOCK_SIZE);
+    // The last 64bits is a secret and is added back to the entropy pool.
+    // This will rotate our gate position
+    _add_unique(runtime_entropy, POOL_SIZE, gatekey, aes_block_rotate, sizeof(gatekey), sizeof(gatekey));
+    //jump_rotate[gate_position] ^= aes_block_rotate[1];
+    // Copy the first 64bits to the user:
+    uu_key[step] ^= aes_block_rotate[1];
+    // Rotate the IV using known and unknown values
+    _add_unique(aes_iv, BLOCK_SIZE, gatekey, aes_block, BLOCK_SIZE, BLOCK_SIZE);
+    // Make a distinct gatekey to make our path less predictable.
+    gatekey ^= curr_jump;
   }
 
   //Cover our tracks
-  next_jump = 0;
-  first_position = 0;
-  second_position = 0;
+  gate_position = 0;
   gatekey = 0;
 }
 
@@ -294,26 +318,6 @@ u64 _alternate_rand()
 }
 
 /*
- * The goal of _unique_key is to return universally-unique key materials
- * that an attacker cannot guess. 
- * 
- * The addition of identifing information (gatekey) and timestamp 
- * - is taken from UUID4 creation to ensure universal unquness.
-*/
-void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
-{
-
-  //Pull in layers of PRNG to get a unique read
-  _get_unique(crng_pool, POOL_SIZE, gatekey, uu_key, nbytes);
-
-  //by adding uniqness from our local state we have yet another reason why the return value is distinct
-  _add_unique(uu_key, nbytes, gatekey, &gatekey, sizeof(gatekey), sizeof(gatekey));
-
-  //clean and return
-  gatekey = 0;
-}
-
-/*
  * Public functon to provide CRNG
  *
  *  - Generate some very hard to guess key material
@@ -358,7 +362,7 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
  * Key, IV, and Image accumulate entropy with each operation
  * They are never overwritten, only XOR'ed with the previous value
  */
-/*
+
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
     //__latent_entropy is better than zeros
@@ -366,7 +370,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     uint8_t   hardned_key[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardend_iv[BLOCK_SIZE] __latent_entropy;
     uint8_t   hardend_image[BLOCK_SIZE] __latent_entropy;    
-    AesOfbContext   aesOfb;
+    struct AES_ctx aes_key_material;
     size_t amountLeft = nbytes;
     size_t chunk;
 
@@ -395,11 +399,9 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
         _add_unique(hardned_key, BLOCK_SIZE, __make_gatekey(*hardned_key), key_accumulator, BLOCK_SIZE, BLOCK_SIZE);
 
         //Generate one block of PRNG
-        AesOfbInitialiseWithKey(&aesOfb, hardned_key, sizeof(hardned_key), hardend_iv);
+        AES_init_ctx_iv(&aes_key_material, hardned_key, hardend_iv);
         //Image countinly encrypted in place, the cyphertext rolls over so plaintext simularity is not a concern.
-        AesOfbOutput(&aesOfb, 
-        hardend_image, 
-        chunk);
+        AES_CBC_encrypt_buffer(&aes_key_material, hardend_image, chunk);
         //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
         memcpy(__user_buf, hardend_image, chunk);
         __user_buf += chunk;
@@ -407,7 +409,6 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 
         //All previous used Key+IV pairs have affected the resulting hardend_image
         //hardend_image will be universally unique for each interation.
-
         //Do we need another bock?
         if(amountLeft > 0)
         {
@@ -417,7 +418,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
           //A new secret key is re-chosen each round, the new IV is used to choose the new key.
           //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
            //Todo capture IV and use it.
-           AesOfbOutput(&aesOfb, hardend_iv, chunk);
+           AES_CBC_encrypt_buffer(&aes_key_material, hardend_iv, chunk);
           //This is the resulting IV unused from AES-OFB, intened to be used in the next round:
           //_add_unique(hardend_iv, BLOCK_SIZE, __make_gatekey(hardend_iv), aesOfb.CurrentCipherBlock, BLOCK_SIZE, BLOCK_SIZE);
         }
@@ -427,7 +428,7 @@ static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
     //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
-*/
+
 
 /* This function is in fact called more times than I have ever used a phone.
  * lets keep this funciton as light as possilbe, and move more weight to extract_crng_user()
@@ -468,7 +469,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   // Add this unique value to the pool
   fast_pool[4] = gatekey;
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
-  _add_unique(crng_pool, POOL_SIZE, gatekey, fast_pool, sizeof(fast_pool), sizeof(fast_pool));
+  _add_unique(runtime_entropy, POOL_SIZE, gatekey, fast_pool, sizeof(fast_pool), sizeof(fast_pool));
 
   //Cleanup
   gatekey = 0;
@@ -593,8 +594,9 @@ int
     )
 {
     uint8_t        local_block[BLOCK_SIZE];
-    uint8_t        large_block[BLOCK_SIZE*1000];
+    uint32_t       large_block[300000];
     FILE *out_test;
+    FILE *bin_test;
     //let's assume the entrpy pool is the same state as a running linux kernel
     //start empty
     memset(local_block, 0, sizeof(local_block)); 
@@ -608,8 +610,7 @@ int
     //todo:
     crng_reseed(runtime_entropy, sizeof(runtime_entropy));
     add_interrupt_randomness(1, 1);
-
-
+  
     //u64 gatekey;
     u32 small = get_random_u32();
     printf("small:%lu", small);
@@ -622,17 +623,22 @@ int
 
     printf("\n\n");
     //lets fill a request
-    printf("705\n");
     extract_crng_user(local_block, BLOCK_SIZE);
     for (int i = 0; i < BLOCK_SIZE; i++)
     {
         printf("%1x", local_block[i]);
     }
     printf("\n\n");
-    extract_crng_user(large_block, BLOCK_SIZE*10);
+    extract_crng_user(large_block, sizeof(large_block));
     
-    out_test = fopen("output.bin","wb");
-    fwrite(large_block,BLOCK_SIZE*10,1,out_test);
+    out_test = fopen("output.die","w");
+    bin_test = fopen("output.bin","wb");
+    fwrite(large_block,sizeof(large_block),1,bin_test);
+    
+    fprintf(out_test, "%s", "#\n#\n#\ntype: d\ncount: 1000\nnumbit: 32\n");
+    for(int x=0;x < 300000; x++){
+      fprintf(out_test, "%u\n", large_block[x]);
+    }
     printf("wrote to output.bin\n\n");
     return 0;
 }
