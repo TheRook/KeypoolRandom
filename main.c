@@ -126,15 +126,18 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
 {
   // Write in the first byte that is read by _get_unique() which is in 64 bits.
   int next_jump = (gatekey * 8) % (keypool_size / 8);
-  //Copy bytes with a jump table - O(n)
+  // Copy bytes with a jump table - O(n)
   for(int step = 0; step < nbytes; step++)
   {
-    // Every byte within keypool_size can be written to at the same time without loosing a write.
-    keypool[next_jump] ^= unique[step];
-    // Save off the jump address before we change it. 
-    next_jump ^= keypool[next_jump];
-    // Circular buffer
-    next_jump = keypool_size % keypool_size;
+    // Check if there is somthing to add.
+    if(unique[step] != 0){
+      // Every byte within keypool_size can be written to at the same time without loosing a write.
+      keypool[next_jump] ^= unique[step];
+      // Save off the jump address before we change it. 
+      next_jump ^= keypool[next_jump];
+      // Circular buffer
+      next_jump = keypool_size % keypool_size;
+    }
   }
   //Leave no trace
   gatekey = 0;
@@ -169,7 +172,6 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
   uint64_t *product = (uint64_t *) &unique;
   int64_t keypool_size_64 = keypool_size / 8;
   uint8_t gate_position = (uint8_t) gatekey % keypool_size_64;
-  uint64_t  curr_jump __latent_entropy;
   uint8_t  jump_offset;
   // We need to seed the process with our first jump location
   product[0] ^= gatekey;
