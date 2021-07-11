@@ -67,10 +67,8 @@ static __u32 blocking_pool_data[OUTPUT_POOL_WORDS] __latent_entropy;
 
 static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes);
 static void crng_reseed(uint8_t *crng_pool, size_t nbytes);
-void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes);
+void _unique_iid(u64 uu_key[], u64 gatekey, size_t nbytes, int rotate);
 u64 _alternate_rand();
-
-
 //_THIS_IP_ must be called from a macro to make it distinct.
 //This process is ideal as a macro because _RET_IP_ and _THIS_IP_ will be more distinct
 //If -_gatekey() was a funciton then _THIS_IP_ will be the same every time.
@@ -82,12 +80,15 @@ u64 _alternate_rand();
   //#endif
 #endif
 
-
+// Rotate bits
+// Bits are not lost so there isn't loss of entropy.
 uint64_t rotl64 ( uint64_t x, int8_t r )
 {
+  r = r % 64;
   return (x << r) | (x >> (64 - r));
 }
 
+// Restore the pool from disk.
 int load_file(uint8_t *dest, size_t len)
 {
   int ret = 0;
@@ -101,26 +102,18 @@ int load_file(uint8_t *dest, size_t len)
   return ret;
 }
 
-/* Add uniqeness to the keypool
+/* Add two buffers to generate uncertainty
  *
- * Uniqeness is not only in value, but also position.
- *
- * _add_unique() shuffles in individual bytes into a larger pool.
- * We want to spray bytes across the pool evenly to create a filed of possilbites
- * With each jump more unkown is introduced to this field.
+ * _add_unique() will spray bytes across the pool evenly to create a filed of possilbites
+ * With each jump more uncertainty is introduced to this field.
  * With this shuffling strategy an attacker is forced to work harder, 
  * and it is O(n) to copy bytes using a jump table or with a linear copy.
- * 
- * More than one thread maybe using _add_unique() on the same global buffer.
- * There is a 1/POOL_SIZE chance of a collision and a loss of a single bit,
- * if we copied over the new entropy linearly, there is a 1/POOL_SIZE chance 
- * we would lose all bytes. Spreading out the writes helps avoid this problem.
- * At the time of this writing POOL_SIZE is 1kb, and 1kb/per-tick of bandwidth is just fine.
  *
  * This shuffling stratigy was built to support the volume of writes created by handle_irq_event_percpu()
- * New CPUs can have 64 cores, adding more locks doesn't scale - 
- * However, increasing POOL_SIZE linearly decreases loss of entropy due to write collisions. 
- * If write collisions from handle_irq_event_percpu() goes up, we can make POOL_SIZE larger.
+ * There is no lock over the keypool, and all writes are done via atomic XOR operations.
+ * Even if a write was lost do to a race condition, it would be difficult to determine what was kept and was wasn't.
+ * Any effect of a race condition would make it even harder to reconstruct the keypool state.
+ * 
  */
 void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t unique[], int unique_size, int nbytes)
 {
@@ -170,6 +163,7 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
 {
   uint64_t *keyspace = (uint64_t *) &keypool;
   uint64_t *product = (uint64_t *) &unique;
+  // We extract out 64bits at a time for performence.
   int64_t keypool_size_64 = keypool_size / 8;
   uint8_t gate_position = (uint8_t) gatekey % keypool_size_64;
   uint8_t  jump_offset;
@@ -196,15 +190,13 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
   }
 }
 
-
 /*
- * The goal of _unique_key is to return universally-unique key materials
- * that an attacker cannot guess. 
+ * The goal of _unique_aes is to produce an unpredictable I.I.D. stream
+ * _get_unique() is meant to be as difficult to predict as possilbe but,
+ * it is not fully I.I.D. - and it doesn't need to be.
  * 
- * The addition of identifing information (gatekey) and timestamp 
- * - is taken from UUID4 creation to ensure universal unquness.
 */
-void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
+void _unique_aes(u8 uu_key[], u64 gatekey, size_t nbytes, int rotate)
 {
   struct AES_ctx ctx;
   uint8_t aes_key_material[BLOCK_SIZE * 3] __latent_entropy;
@@ -212,45 +204,55 @@ void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
   uint8_t *aes_iv = aes_key_material + BLOCK_SIZE;
   uint8_t *aes_block = aes_key_material + BLOCK_SIZE * 2;
   uint64_t *aes_block_rotate = (uint64_t *)aes_block;
-  _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, aes_key_material, sizeof(aes_key_material));
-  uint8_t *gate_position = (uint8_t *) &gatekey;
   uint64_t *jump_rotate = (uint64_t *) &runtime_entropy;
   size_t jump_rotate_size = KEYPOOL_SIZE / 8;
-  uint64_t first_offset = 0;
-  uint64_t curr_jump __latent_entropy;
-  first_offset = keypool_primes[gate_position[7] % sizeof(keypool_primes)];
+  size_t amount_left = nbytes;
+  size_t chunk = 0;
+  // Get a new key, iv and message from the entropy pool:
+  _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, aes_key_material, sizeof(aes_key_material));
+  // Cover our tracks
+  // Make sure this gatekey and entry location can never be reused:
+  _add_unique(runtime_entropy, POOL_SIZE, gatekey, aes_block_rotate, sizeof(gatekey), sizeof(gatekey));
   // Pull 64bits at a time out of the ring function
-  for(size_t step = 0; step < nbytes; step+=8)
+  while( amount_left > 0 )
   {
-    // Pull the next 64bits from the entropy source:
-    //curr_jump ^= jump_rotate[gate_position % jump_rotate_size];
-    _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, &curr_jump, sizeof(curr_jump));
-  
-    // Add uncertity - rotate what we get out of the entropy pool
-    curr_jump = rotl64(curr_jump, aes_block[step % BLOCK_SIZE] % 64);
-    // Make the key less predictable
-    _add_unique(aes_key_material,BLOCK_SIZE*3,gatekey,&curr_jump,sizeof(curr_jump),sizeof(curr_jump));
+    // account for sizes that are not evenly divisable by BLOCK_SIZE.
+    chunk = __min(amount_left, BLOCK_SIZE);
     // Populate our cipher struct
     AES_init_ctx_iv(&ctx, aes_key, aes_iv);
     // Encrypt one block with AES-CBC-128:
     AES_CBC_encrypt_buffer(&ctx, aes_block, BLOCK_SIZE);
-    // The last 64bits is a secret and is added back to the entropy pool.
-    // This will rotate our gate position
-    _add_unique(runtime_entropy, POOL_SIZE, gatekey, aes_block_rotate, sizeof(gatekey), sizeof(gatekey));
-    //jump_rotate[gate_position] ^= aes_block_rotate[1];
     // Copy the first 64bits to the user:
-    uu_key[step] ^= aes_block_rotate[1];
-    // Rotate the IV using known and unknown values
-    _add_unique(aes_iv, BLOCK_SIZE, gatekey, aes_block, BLOCK_SIZE, BLOCK_SIZE);
-    // Make a distinct gatekey to make our path less predictable.
-    gatekey ^= curr_jump;
+    memcpy(uu_key, aes_block, chunk);
+    amount_left -= BLOCK_SIZE;
+    if(amount_left > 0)
+    {
+      // move our copy dest
+      uu_key += chunk;
+      if(rotate)
+      {
+        // Rotate the key material with the output so that similar keys are never reused:
+        _add_unique(aes_key_material, BLOCK_SIZE*3, gatekey, aes_block, BLOCK_SIZE, BLOCK_SIZE);
+      }
+      // The ciphertext from the previous call to aes() is the plaintext for the next invocation.
+    }
   }
-
-  //Cover our tracks
-  gate_position = 0;
+  // Cleanup the secrets used
+  memzero_explicit(&aes_key_material, BLOCK_SIZE*3);
   gatekey = 0;
 }
 
+/*
+ * The goal is to produce a very secure source of I.I.D.
+ * (Independent and identically distributed)
+ * This is a wrapper to dispatch to whatever primitive is best
+ */
+void _unique_iid(u64 uu_key[], u64 gatekey, size_t nbytes, int rotate)
+{
+  // AES-NI should be faster than sha1 on platforms that support it.
+  // todo - _unique_sha1() and _unique_other() for flexabilty.
+  return _unique_aes(uu_key,gatekey,nbytes,rotate);
+}
 
 /*
  * The goal here is to be fast
@@ -261,8 +263,8 @@ void _unique_key(u64 uu_key[], u64 gatekey, size_t nbytes)
  */
 u64 get_random_u64(void)
 {
-  u64 anvil __latent_entropy;
-  _unique_key((u64 *)&anvil, __make_gatekey(&anvil), sizeof(anvil));
+  u64 anvil;
+  _unique_iid((u64 *)&anvil, __make_gatekey(&anvil), sizeof(anvil), 0);
   return anvil;
 }
 
@@ -274,8 +276,8 @@ u64 get_random_u64(void)
  */
 u32 get_random_u32(void)
 {
-  u32 anvil __latent_entropy;
-  _unique_key((u32 *)&anvil, __make_gatekey(&anvil), sizeof(anvil));
+  u32 anvil;
+  _unique_iid((u32 *)&anvil, __make_gatekey(&anvil), sizeof(anvil), 0);
   return anvil;
 }
 
@@ -310,7 +312,7 @@ u64 _alternate_rand()
     // todo: 32bit
     u64 alternate_gatekey __latent_entropy;
     alternate_gatekey ^= (u64)jiffies ^ (u64)&anvil;
-    _unique_key(&anvil, alternate_gatekey, sizeof(anvil));
+    _unique_iid(&anvil, alternate_gatekey, sizeof(anvil), 0);
     // 'anvil' is a small jump table entropy pool that we can further enrich
     _add_unique(&anvil, sizeof(anvil), alternate_gatekey, &alternate_gatekey, sizeof(alternate_gatekey), sizeof(alternate_gatekey));
     // cleanup
@@ -330,23 +332,14 @@ u64 _alternate_rand()
  * This is where users get their entropy from the random.c 
  * device driver (i.e. reading /dev/random)
  */
-static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
-    //Ok, we need somthing bigger, time for OFB.
-    uint8_t    anvil[BLOCK_SIZE] __latent_entropy;
-    
+static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){  
     //If we only need a few bytes these two are the best source.
     if(nbytes <= 0){
       return nbytes;
-    } if(nbytes <= BLOCK_SIZE){
-      //Get upto one block of good CRNG:
-      _unique_key(anvil, __make_gatekey(anvil), BLOCK_SIZE);
-      //Copy into user space
-      memcpy(__user_buf, anvil, nbytes);
-    }else{
-      _unique_key(__user_buf, __make_gatekey(anvil), nbytes);
-    }
-    //cover our tracks
-    memzero_explicit(anvil, BLOCK_SIZE);       
+    } else {
+      // Fill the request - no rotate
+      _unique_iid(__user_buf, __make_gatekey(__user_buf), nbytes, 0);  
+    }     
     //at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
@@ -367,67 +360,14 @@ static ssize_t extract_crng_user(uint8_t *__user_buf, size_t nbytes){
 
 static ssize_t extract_crng_user_unlimited(uint8_t *__user_buf, size_t nbytes)
 {
-    //__latent_entropy is better than zeros
-    uint8_t   key_accumulator[BLOCK_SIZE] __latent_entropy;
-    uint8_t   hardned_key[BLOCK_SIZE] __latent_entropy;
-    uint8_t   hardend_iv[BLOCK_SIZE] __latent_entropy;
-    uint8_t   hardend_image[BLOCK_SIZE] __latent_entropy;    
-    struct AES_ctx aes_key_material;
-    size_t amountLeft = nbytes;
-    size_t chunk;
-
+    //If we only need a few bytes these two are the best source.
     if(nbytes <= 0){
       return nbytes;
-    }
-
-    //For key scheduling purposes, the entropy pool acts as a kind of twist table.
-    //The pool is circular, so our starting point can be the last element in the array.
-    _unique_key(hardned_key, __make_gatekey(hardned_key), BLOCK_SIZE);
-    _unique_key(hardend_iv, __make_gatekey(hardend_iv), BLOCK_SIZE);
-    //Encrypting noise is harder to guess than zeros
-    _unique_key(hardend_image, __make_gatekey(hardend_image), BLOCK_SIZE);
-
-    //The key, IV and Image will tumble for as long as they need, and copy out PRNG to the user. 
-    //At no point will a Key, or IV or Image ever be-reused.
-    while( amountLeft > 0 )
-    {
-        chunk = __min(amountLeft, BLOCK_SIZE );
-        if(chunk < 0){
-          break;
-        }
-        //Grab a new BLOCK_SIZE and XOR it with the previous state.
-        _unique_key(key_accumulator, __make_gatekey(*key_accumulator), BLOCK_SIZE);
-        //Add this new round of entropy to our keys
-        _add_unique(hardned_key, BLOCK_SIZE, __make_gatekey(*hardned_key), key_accumulator, BLOCK_SIZE, BLOCK_SIZE);
-
-        //Generate one block of PRNG
-        AES_init_ctx_iv(&aes_key_material, hardned_key, hardend_iv);
-        //Image countinly encrypted in place, the cyphertext rolls over so plaintext simularity is not a concern.
-        AES_CBC_encrypt_buffer(&aes_key_material, hardend_image, chunk);
-        //Copy it out to the user, local_image is the only thing we share, local_iv and the key are secrets.
-        memcpy(__user_buf, hardend_image, chunk);
-        __user_buf += chunk;
-        amountLeft -= chunk;
-
-        //All previous used Key+IV pairs have affected the resulting hardend_image
-        //hardend_image will be universally unique for each interation.
-        //Do we need another bock?
-        if(amountLeft > 0)
-        {
-          //At the end of the loop we get:
-          //The cipher text from this round is in local_image, which in the input for the next round
-          //The IV is a PRNG feedback as per the OFB spec - this is consistant
-          //A new secret key is re-chosen each round, the new IV is used to choose the new key.
-          //Using an IV as an index insures this instance has a key that is unkown to others - at no extra cost O(1).
-           //Todo capture IV and use it.
-           AES_CBC_encrypt_buffer(&aes_key_material, hardend_iv, chunk);
-          //This is the resulting IV unused from AES-OFB, intened to be used in the next round:
-          //_add_unique(hardend_iv, BLOCK_SIZE, __make_gatekey(hardend_iv), aesOfb.CurrentCipherBlock, BLOCK_SIZE, BLOCK_SIZE);
-        }
-     }
-    //Cover our tracks.
-    memzero_explicit(key_accumulator, sizeof(key_accumulator));
-    //Cleanup complete, at this point it should not be possilbe to re-create any part of the PRNG stream used.
+    } else {
+      // Fill the request - rotate key mateiral:
+      _unique_iid(__user_buf, __make_gatekey(__user_buf), nbytes, 1);  
+    }     
+    //at this point it should not be possilbe to re-create any part of the PRNG stream used.
     return nbytes;
 }
 
@@ -446,7 +386,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
 {
   //Globally unique gatekey
   uint64_t gatekey __latent_entropy;
-  u64  fast_pool[5];
+  u64  fast_pool[5] __latent_entropy;
   struct pt_regs    *regs = get_irq_regs();
   //irq_flags contains a few bits, and every bit counts.
   cycles_t    cycles = irq_flags;
@@ -469,7 +409,7 @@ void add_interrupt_randomness(int irq, int irq_flags)
   // It will be XOR'ed with __latent_entropy to prevent outsider control
   gatekey ^= __make_gatekey(&irq);
   // Add this unique value to the pool
-  fast_pool[4] = gatekey;
+  fast_pool[4] ^= gatekey;
   //A single O(1) XOR operation is the best we can get to drip the entropy back into the pool
   _add_unique(runtime_entropy, POOL_SIZE, gatekey, fast_pool, sizeof(fast_pool), sizeof(fast_pool));
 
@@ -479,19 +419,19 @@ void add_interrupt_randomness(int irq, int irq_flags)
 
 static void crng_reseed(uint8_t *crng_pool, size_t nbytes)
 {
+  // This maybe when the pool is empty, lets get a small amount from letant entropy:
   uint64_t gatekey __latent_entropy;
   gatekey ^= __make_gatekey(&gatekey);
-  uint8_t    streached_prng[POOL_SIZE] __latent_entropy;
+  uint8_t    streached_prng[POOL_SIZE];
 
   // Get a contianer of noise
-  _unique_key(streached_prng, gatekey, POOL_SIZE);
+  _unique_iid(streached_prng, gatekey, POOL_SIZE, 1);
 
-  // Output of extract_crng_user() will XOR with the current crng_pool
   // re-seed with the current output, deleting the old state
   extract_crng_user(crng_pool, nbytes);
 
-  // Add the noise obtained from a pool that no longer exists
-  // Each byte is written using a jump table so its position is unkown
+  // Add the noise obtained from a pool that no longer exists, the left washes the right.
+  // Each byte is written using a jump table so its final path is unkown
   _add_unique(crng_pool, POOL_SIZE, gatekey, streached_prng, POOL_SIZE, POOL_SIZE);
   
   //cleanup
@@ -551,9 +491,9 @@ static void find_more_entropy_in_memory(uint8_t *crng_pool, int nbytes_needed)
 
   //twigs when wrapped together can become loadbearing
   //a samurai sword has many layers of steel.
-  //_unique_key() might not be not safe at this point  
+  //_unique_iid() might not be not safe at this point  
   // - but it is unique enough as a seed.
-  _unique_key(anvil, gatekey, nbytes_needed);
+  _unique_iid(anvil, gatekey, nbytes_needed, 1);
   _add_unique(crng_pool, POOL_SIZE, gatekey, anvil, nbytes_needed, nbytes_needed);
   
   //Clean up our tracks so another process cannot see our source material
@@ -608,8 +548,7 @@ int
     load_file(runtime_entropy, POOL_SIZE);    
     //find_more_entropy_in_memory(runtime_entropy, POOL_SIZE);
     //Start with noise in the pool for the jump table.
-    //This will ensure that _unique_key() doesn't depend on __latent_entropy
-    //todo:
+    //This will ensure that _unique_iid() doesn't depend on __latent_entropy
     crng_reseed(runtime_entropy, sizeof(runtime_entropy));
     add_interrupt_randomness(1, 1);
   
