@@ -171,7 +171,6 @@ void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *uniqu
   product[0] ^= gatekey;
   // A prime is used to maximize the number of reads without repeat
   jump_offset = keypool_primes[product[1] % sizeof(keypool_primes)];
-
   // Pull 64bits at a time out of the ring function
   for(size_t step = 0; step < nbytes/8; step++)
   {
@@ -455,6 +454,7 @@ static void crng_reseed(uint8_t *crng_pool, size_t nbytes)
 static void find_more_entropy_in_memory(uint8_t *crng_pool, int nbytes_needed)
 {
   uint8_t    *anvil;
+  // This is early in boot, __latent_entropy is helpful
   u64        gatekey __latent_entropy;
   gatekey  ^= __make_gatekey(&anvil);
 
@@ -513,7 +513,7 @@ _random_read(int nonblock, char __user *buf, size_t nbytes)
 static ssize_t
 random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
-  return extract_crng_user(buf, nbytes);
+  return extract_crng_user(buf+*ppos, nbytes);
 }
 
 static ssize_t
@@ -521,7 +521,7 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
-  return extract_crng_user(buf, nbytes);
+  return extract_crng_user_unlimited(buf+*ppos, nbytes);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
