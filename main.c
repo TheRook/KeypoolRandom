@@ -208,10 +208,11 @@ void _unique_aes(u8 uu_key[], u64 gatekey, size_t nbytes, int rotate)
   size_t jump_rotate_size = KEYPOOL_SIZE / 8;
   size_t amount_left = nbytes;
   size_t chunk = 0;
-  // Get a new key, iv and message from the entropy pool:
+  // Get a new key, iv and preimage from the entropy pool:
   _get_unique(runtime_entropy, KEYPOOL_SIZE, gatekey, aes_key_material, sizeof(aes_key_material));
   // Cover our tracks
-  // Make sure this gatekey and entry location can never be reused:
+  // Make sure this gatekey + entry location can never be reused:
+  // No two accessors can generate the same gatekey so this is threadsafe.
   _add_unique(runtime_entropy, POOL_SIZE, gatekey, aes_block_rotate, sizeof(gatekey), sizeof(gatekey));
   // Pull 64bits at a time out of the ring function
   while( amount_left > 0 )
@@ -227,7 +228,7 @@ void _unique_aes(u8 uu_key[], u64 gatekey, size_t nbytes, int rotate)
     amount_left -= BLOCK_SIZE;
     if(amount_left > 0)
     {
-      // move our copy dest
+      // move our copy destination
       uu_key += chunk;
       if(rotate)
       {
@@ -239,7 +240,7 @@ void _unique_aes(u8 uu_key[], u64 gatekey, size_t nbytes, int rotate)
   }
   // Cleanup the secrets used
   memzero_explicit(&aes_key_material, BLOCK_SIZE*3);
-  gatekey = 0;
+  gatekey ^= gatekey;
 }
 
 /*
