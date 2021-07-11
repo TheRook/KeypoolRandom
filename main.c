@@ -513,7 +513,7 @@ _random_read(int nonblock, char __user *buf, size_t nbytes)
 static ssize_t
 random_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
-  return extract_crng_user(buf+*ppos, nbytes);
+  return extract_crng_user(buf+*ppos, nbytes-*ppos);
 }
 
 static ssize_t
@@ -521,7 +521,7 @@ urandom_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
   //This is a non-blocking device so we are not going to wait for the pool to fill. 
   //We will respect the users wishes, and spend time to produce the best output.
-  return extract_crng_user_unlimited(buf+*ppos, nbytes);
+  return extract_crng_user_unlimited(buf+*ppos, nbytes-*ppos);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
