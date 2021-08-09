@@ -52,7 +52,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
  - Works identically irregardless of hardware
  - Functionally indistinguishable from a so call "true" RNG - we pass all the tests
  - Function-level security where all Inputs and hardware are untrusted
- - Use race conditions as a means to compound unknowns while maintaining function-level security
+ - A design where race conditions are useful to the defender 
  - No worse than the available hardware rand, and unaffected by any known or unknown backdoors in hardware rand 
  - proactive security 
 
