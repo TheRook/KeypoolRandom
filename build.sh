@@ -1,3 +1,3 @@
 #!/bin/bash
-gcc -Wall -g main.c -o keypool -w -c -Iaes.h
+gcc -Wall -g main.c -o keypool -w  -Iaes.h
 chmod +x keypool 
