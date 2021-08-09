@@ -1,7 +1,7 @@
 # Keypool Random
 A faster lockless /dev/random proposal for embedded, battery powered devices, and for users that need more performance out of Linux.
 
-## Build instructions:
+### Build instructions:
 
 Builds with GCC on any platform, this is using scaffolding to build a local binary - it isn't linked with the mainline linux (yet).  It is just an experimental module that runs locally to prove the theory and to discuss this design.
 
@@ -12,7 +12,7 @@ On any system just run:
 - ./build.sh
 - ./keypool
 
-## Motivation
+### Motivation
 
 This is a CSPRNG, a cryptographically-secure random number generator that is for all intensive purposes the de-facto source of randomness.  The goal is to improve Linux syscall performance while providing a high-quality NIST compliant /dev/random device driver. We can accomplish this by removing all locks, and only use O(1) operations for adding entropy.
 
@@ -22,7 +22,7 @@ Currently in Linux, as well as other operating systems - a lock it used for a co
 
 When I first read random.c in the linux kernel it was magic - making a stream of security random PRNG out of thin air.  I initially fell in love with it because I thought it was well written, it had great documentation and provided easily understandable magic. But as I learned more about Linux I started to see it more of an encumbrance.  A few things started to bother me about random.c - the first one being one of it’s means of entropy collection is a burden on heavily trafficked syscalls, like the ones used in file-io and memory allocation.  Let me ask you this, name one other kernel driver that makes unrelated syscalls slower in order for it to function? There are very few - and most of them are security features. There is a reason why it is hard to name another and that is because we have been good about avoiding this pattern in other parts of the Linux kernel - so can we avoid this pattern in random.c?
 
-## Theory
+### Theory
 
 Sand has a number of great properties. Imagine sitting on the beach and taking a picture of sand close up, and turning it into a binary stream - that would be a difficult number to guess even if the attacker knows it is a picture of sand and what beach you were on and where you were sitting.  This picture of sand is so random, you wouldn't need a very high resolution image - in fact maybe just 1024 bytes would be too large for anyone to guess.
 
@@ -56,7 +56,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
  - No worse than the available hardware rand, and unaffected by any known or unknown backdoors in hardware rand 
  - proactive security 
 
-## Locked or Lockless?
+### Locked or Lockless?
 
 Locks cannot make the stream more difficult to predict, therefore they are unnecessary.  The 'gatekey' generated is a 64bit value, and cannot collide in any meaningful time-frame.  No two consumers of a PRNG stream can occupy the same 'gatekey' because of the pidgen-hole principle; no two consumers can be in the same place at the same time - no two callers can attempt to fill the same buffer at the same time - so this derived value can never collide so no locks should be required.  If you have written device drivers before, then you have become accustomed to writing tons of locks, and when you have a hammer, everything looks like a nail.  What if a 'keypool' is one place where adding locks undermines the intended effect?  This is the one place where we can remove locks to improve both efficiency and also security.
 
@@ -64,4 +64,4 @@ Instead of avoiding race-conditions, a new key is selected from a global buffer 
 
 We are generating values that are less reliant on time stamps, and more reliant on noise created by cryptographic primitives and the uncertainty introduced by race conditions. In this design, the defender is stacking as many uncertainties as possible together.  An attacker who is tasked with the misfortune of attempting to guess the current state of the pool will become less and less confident over time.  Because only ciphertext or a hash is returned, it is impossible for an outsider to determine what order of operations were taken upon the entropy pool leading up to any given invocation.
 
-Instead of seeing the pool as "empty" or "full" lets instead see it as "warmed up" or "cold."  If we know that the pool is warmed up and full then we don't need locks for counter consistency, and also urandom no longer needs to block until the entropy pool is "full enough."  However, in respect of the user’s intentions,  urandom should be a more random variant of the device driver, and the system can and will work harder to derive a higher degree of security.
+Instead of seeing the pool as "empty" or "full" lets instead see it as "warmed up" or "cold."  If we know that the pool is warmed up then we don't need locks for counter consistency, and also urandom no longer needs to block until the entropy pool is "full enough."  However, in respect of the user’s intentions,  urandom should be a more random variant of the device driver, and the system can and will work harder to derive a higher degree of security.
