@@ -53,7 +53,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
  - Functionally indistinguishable from a so call "true" RNG - we pass all the tests
  - Function-level security where all Inputs and hardware are untrusted
  - A design where race conditions are useful to the defender 
- - No worse than the available hardware rand, and unaffected by any known or unknown backdoors in hardware rand 
+ - Unaffected by any known or unknown backdoors in hardware rand 
  - proactive security 
 
 ### Locked or Lockless?
