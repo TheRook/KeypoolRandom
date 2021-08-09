@@ -43,7 +43,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
 
 ### Differences between random and urandom
 
-/dev/random needs to be fast - this is a provider of entropy to the user and to other kernel subsystems. It needs to be always available, safe and fast.
+/dev/random needs to be fast - this is a provider of entropy to the user and to other kernel subsystems. It needs to be always available, safe and preformat.
 
 /dev/urandom on the other hand needs to respect the heightened security concerns of the user. urandom is short for 'unlimited random' - it has no period, and therefore never repeats. Our urandom creates a new entropy pool for each caller-instance that is repopulated upon every iteration, making it truly unlimited, and also entirely opaque to any attacker using row-hammer-like bugs to read a global state.
 
@@ -60,7 +60,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
 
 ## Locked or Lockless?
 
-Locks cannot make the stream more difficult to predict, therefore they are unnecessary.  The 'gatekey' generated is a 64bit value, and cannot collide in any meaningful time-frame.  No two consumers of a PRNG stream can occupy the same 'gatekey' because of the pidgen-hole principle; no two consumers can be in the same place at the same time - no two consumers can attempt to fill the same buffer at the same time - so this derived value can never collide so no locks should be required.  If you are used to writing device drivers, then you are used to writing tons of locks, and when you have a hammer, everything looks like a nail.  What if a 'keypool' is one place where adding locks undermines the intended effects?  Is this the one place where we can remove locks to improve both efficiency and security? 
+Locks cannot make the stream more difficult to predict, therefore they are unnecessary.  The 'gatekey' generated is a 64bit value, and cannot collide in any meaningful time-frame.  No two consumers of a PRNG stream can occupy the same 'gatekey' because of the pidgen-hole principle; no two consumers can be in the same place at the same time - no two consumers can attempt to fill the same buffer at the same time - so this derived value can never collide so no locks should be required.  If you have written device drivers before, then you have become accustomed to writing tons of locks, and when you have a hammer, everything looks like a nail.  What if a 'keypool' is one place where adding locks undermines the intended effects?  Is this the one place where we can remove locks to improve both efficiency and also security? 
 
 Instead of avoiding race-conditions, a new key is selected from a global buffer with the intention of increasing the likelihood of reading a value that will be overwritten.  This global buffer that we call a 'keypool' can have any number of threads acting upon it so the keys produced are inherently ephemeral, and difficult for any outsider to  observe or otherwise determine.  Again, nothing is stopping us from adding locks, but why wait? Pulling a key from a buffer that may or may not be undergoing a write operation is a benefit because it introduces an independent variable that an attacker is forced to account for and the defender gets absolutely free.
 
