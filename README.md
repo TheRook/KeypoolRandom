@@ -16,7 +16,7 @@ On any system just run:
 
 This is a CSPRNG, a cryptographically-secure random number generator that is for all intensive purposes the de-facto source of randomness.  The goal is to improve Linux syscall performance while providing a high-quality NIST compliant /dev/random device driver. We can accomplish this by removing all locks, and only use O(1) operations for adding entropy.
 
-Currently in Linux, as well as other operating systems - locks are used by the existing credit_entropy_bits() which is a global lock that is taken out by each invocation of handle_irq_event_percpu() (handle.c).  Having every syscall depend on the same lock causes problems that we avoid entirely.
+Currently in Linux, as well as other operating systems - locks taken out to quantify how much entropy was collected.  In linux we have credit_entropy_bits() which takes out a global lock upon each invocation of handle_irq_event_percpu() (handle.c).  Having every syscall depend on the same lock causes problems, and this is a problem that we can avoid entirely.
 
 ## Theory
 
@@ -33,7 +33,7 @@ The following performance measures should be improved:
  - syscall latency
  - boot time
  - number of locks taken out to boot linux
- - battery life / power usage / CO2
+ - battery life / power usage / CO2 produced
 
 Any improvement in the linux kernel's performance will have a dramatic effect on power usage worldwide.  If we can improve the efficiency of Linux’s random number generator by removing bottlenecks then our cell-phone battery will last longer, our electric cars will go further, our data centers will draw less electricity, and the technology we love will produce less CO2.   None of this should be done at sacrificing basic security needs or infringing on any NIST requirement..
 
@@ -41,7 +41,7 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
 
 /dev/random needs to be fast - this is a provider of entropy to the user and to other kernel subsystems. It needs to be always available, safe and fast.
 
-/dev/urandom on the other hand needs to respect the concern of the user. urandom is short for 'unlimited random' - it has no period, and therefore never repeats. Our urandom creates a new entropy pool for each caller-instance that is repopulated upon every iteration, making it truly unlimited, and also entirely opaque to any attacker.
+/dev/urandom on the other hand needs to respect the heightened security concerns of the user. urandom is short for 'unlimited random' - it has no period, and therefore never repeats. Our urandom creates a new entropy pool for each caller-instance that is repopulated upon every iteration, making it truly unlimited, and also entirely opaque to any attacker using row-hammer-like bugs to read a global state.
 
 ### Features
  - Follow NIST security requirements.
