@@ -18,6 +18,10 @@ This is a CSPRNG, a cryptographically-secure random number generator that is for
 
 Currently in Linux, as well as other operating systems - locks taken out to quantify how much entropy was collected.  In linux we have credit_entropy_bits() which takes out a global lock upon each invocation of handle_irq_event_percpu() (handle.c).  Having every syscall depend on the same lock causes problems, and this is a problem that we can avoid entirely.
 
+### Foreword
+
+When I first read random.c in the linux kernel it was magic - making a stream of security random PRNG out of thin air.  I initially fell in love with it because I thought it was well written, it had great documentation and provided easily understandable magic. But as I learned more about Linux I started to see it more of an encumbrance.  A few things started to bother me about random.c - the first one being one of it’s means of entropy collection is a burden on heavily trafficked syscalls, like the ones used in file-io and memory allocation.  Let me ask you this, name one other kernel driver that makes unrelated syscalls slower in order for it to function? There are very few - and most of them are security features. There is a reason why it is hard to name another and that is because we have been good about avoiding this pattern in other parts of the Linux kernel - so can we avoid this pattern in random.c?
+
 ## Theory
 
 Sand has a number of great properties. Imagine sitting on the beach and taking a picture of sand close up, and turning it into a binary stream - that would be a difficult number to guess even if the attacker knows it is a picture of sand and what beach you were on and where you were sitting.  This picture of sand is so random, you wouldn't need a very high resolution image - in fact maybe just 1024 bytes would be too large for anyone to guess.
@@ -46,17 +50,13 @@ Any improvement in the linux kernel's performance will have a dramatic effect on
 ### Features
  - Follow NIST security requirements.
  - Works identically irregardless of hardware
- - Provide a high bar of security while being a sensibly-efficient source of random values 
+ - Functionally indistinguishable from a so call "true" RNG - we pass all the tests
  - Function-level security where all Inputs and hardware are untrusted
  - Use race conditions as a means to compound unknowns while maintaining function-level security.
  - All outputs are AES cipher-text 
  - Don’t trust input from userspace or from hardware
  - No worse than the available hardware rand, and unaffected by any known-backdoors for hardware rand. 
  - proactive security 
-
-### Foreword
-
-When I first read random.c in the linux kernel it was magic - making a stream of security random PRNG out of thin air.  I initially fell in love with it because I thought it was well written, it had great documentation and provided easily understandable magic. But as I learned more about Linux I started to see it more of an encumbrance.  A few things started to bother me about random.c - the first one being one of it’s means of entropy collection is a burden on heavily trafficked syscalls, like the ones used in file-io and memory allocation.  Let me ask you this, name one other kernel driver that makes unrelated syscalls slower in order for it to function? There are very few - and most of them are security features. There is a reason why it is hard to name another and that is because we have been good about avoiding this pattern in other parts of the Linux kernel - so can we avoid this pattern in random.c?
 
 ## Locked or Lockless?
 
