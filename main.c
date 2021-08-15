@@ -161,8 +161,8 @@ void _add_unique(uint8_t keypool[], int keypool_size, u64 gatekey, uint8_t uniqu
  */
 void _get_unique(uint8_t *keypool, int keypool_size, u64 gatekey, uint8_t *unique, size_t nbytes)
 {
-  uint64_t *keyspace = (uint64_t *) &keypool;
-  uint64_t *product = (uint64_t *) &unique;
+  uint64_t *keyspace = (uint64_t *) keypool;
+  uint64_t *product = (uint64_t *) unique;
   // We extract out 64bits at a time for performance.
   int64_t keypool_size_64 = keypool_size / 8;
   uint8_t gate_position = (uint8_t) gatekey % keypool_size_64;
@@ -224,7 +224,7 @@ void _unique_aes(u8 uu_key[], u64 gatekey, size_t nbytes, int rotate)
     AES_CBC_encrypt_buffer(&ctx, aes_block, BLOCK_SIZE);
     // Copy the first 64bits to the user:
     memcpy(uu_key, aes_block, chunk);
-    amount_left -= BLOCK_SIZE;
+    amount_left -= chunk;
     if(amount_left > 0)
     {
       // move our copy destination
